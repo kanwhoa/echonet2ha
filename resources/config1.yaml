@@ -1,0 +1,18 @@
+# Simple config, enable all found interfaces.
+#
+# Logging configuration
+logging:
+  # Filename is parsed using strftime format. If the filename changes,
+  # The file is considered to have to rolled over.
+  filename: /tmp/e2m.log
+  # Compress historical files
+  compress: true
+# MQTT configuration
+mqtt:
+  url: mqtt://examplehost.local:1883/
+  useMdns: true
+  # credentials
+  # certificate
+  # truststore
+network:
+  # Don't specify any interfaces to include all.

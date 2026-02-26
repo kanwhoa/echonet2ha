@@ -64,7 +64,7 @@ pub async fn get_network_interfaces() -> Result<(), NetworkConfigurationError> {
             _ => None
         } {
             if !ipaddr.is_loopback() {
-                println!("Pushing '{}', address {}",ifaddr.interface_name, ifaddr.address.unwrap());
+                println!("Pushing '{}', address {}", ifaddr.interface_name, ifaddr.address.unwrap());
                 ifaddrs.push(ifaddr);
             } else {
                 loopback_interface_name = Some(ifaddr.interface_name);
@@ -120,6 +120,7 @@ pub async fn do_listen() -> io::Result<()> {
     // This is temp for testing, will require a restructure.
     let packet = echonet::wire::EchonetFrame::create_all_nodes_query();
     println!("Got packet: {:#?}", packet);
+    // For network 
 
 
     // Leave the multicast group

@@ -1,14 +1,45 @@
 [package]
 name = "echonet2mqtt"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+documentation.workspace = true
+
+[workspace]
+members = [
+    "crates/macros",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 authors = ["Tim Hurman <kanwhoa@gmail.com>"]
+description = "A bridge between EchoNet Lite and MQTT"
+documentation = "https://to.be.defined/"
 
-[dependencies]
+[workspace.dependencies]
+chrono = "0.4.43"
 clap = { version = "4.5.48", features = ["derive"] }
-lazy_static = "1.5.0"
+log = "0.4.29"
 nix = { version = "0.30.1", features = ["default", "net"] }
+proc-macro2 = "1.0.106"
+quote = "1.0.44"
 rand = "0.10.0"
 serde = { version = "1.0.227", features = ["derive"] }
 serde_yaml = "0.9.34"
+stderrlog = "0.6.0"
+syn = "2.0.116"
 tokio = { version = "1.47.1", features = ["full"] }
+
+[dependencies]
+macros = { path = "crates/macros" }
+chrono.workspace = true
+clap.workspace = true
+log.workspace = true
+nix.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+stderrlog.workspace = true
+tokio.workspace = true

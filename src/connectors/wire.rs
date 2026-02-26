@@ -1,5 +1,7 @@
 //! ECHONET Lite wire represenations
 #![allow(dead_code)]
+use macros::Size;
+use std::fmt::Write;
 use rand::prelude::*;
 
 const EHD1_ECHONET: u16 = 0x0800;
@@ -90,6 +92,7 @@ const EOJ_CLASS_GROUP_PROFILE_NODE_PROFILE_TX_ONLY_NODE: u8 = 0x02;
 /// Main ECHONET struct
 /// Middleware spec 3.2.1
 #[repr(C, packed)]
+#[derive(Size)]
 pub struct EchonetFrame {
     /// ECHONET header 1
     ehd1: u8,
@@ -100,6 +103,8 @@ pub struct EchonetFrame {
     // Embedded ECHONET EDATA
     edata: EchonetEdata,
 }
+// FIXME: from macro
+const ECHONETFRAME_SIZE: usize = 12;
 
 /// ECHONET EDATA struct
 /// Middleware spec 3.2.3
@@ -116,7 +121,9 @@ pub struct EchonetEdata {
     /// Middleware spec 3.2.5
     esv: u8,
     /// Number of processing properties
-    opc: u8
+    opc: u8,
+    /// Each of the properties. Must store this as u8 and then cast when extracting to avoid lots of compiler issues.
+    epcs: [u8]
 }
 
 /// ECHONET property struct
@@ -128,8 +135,32 @@ pub struct EchonetProperty {
     /// Property Data Counter
     pdc: u8,
     /// Property data value (length is defined in PDC). This is a dynamically-sized type.
-    edc: [u8]
+    edt: [u8]
 }
+
+/// Macro to help with unsafe read access. This is not efficient for large scale writes.
+/// TODO: use a "rust macro get type of struct" to get the type and add the ordering.
+macro_rules! get_value {
+    ($self:ident, $field:ident) => {
+        unsafe { (&raw const $self.$field).read_unaligned() }
+    };
+}
+
+/// Need to create a dummy constant which can then be used to determine the size of the DST.
+/// This is so incredibly dumb, but Rust prevents the size_of use with a DST rather than
+/// assuming the size_of dynamic part to be 0 length.
+/*const SIZED_INSTANCE = Box::new(EchonetFrame {
+    ehd1: 0x00,
+    ehd2: 0x00,
+    tid: 0x0000,
+    edata: EchonetEdata {
+        seoj: [0x00, 0x00, 0x00],
+        deoj: [0x00, 0x00, 0x00],
+        esv: 0x00,
+        opc: 0x00,
+        epcs: [0; 8]
+    }
+});*/
 
 /// ECHONET frame methods
 impl EchonetFrame {
@@ -155,7 +186,9 @@ impl EchonetFrame {
     #[inline(always)]
     fn create_frame(maybe_tid: Option<u16>, property_size: usize) -> Box<Self> {
         // Calcaulte the layout size manually to avoid padding by the layout.
-        let layout = std::alloc::Layout::from_size_align(std::mem::size_of::<EchonetFrame>() + property_size, 1).unwrap();
+        // FIXME: use a macro to get the size of the struct?
+        let layout = std::alloc::Layout::from_size_align(ECHONETFRAME_SIZE + property_size, 1).unwrap();
+        println!("Layout Size info: {}", layout.size());
 
         // Get the transaction ID.
         let tid = maybe_tid.unwrap_or({
@@ -164,20 +197,22 @@ impl EchonetFrame {
         });
 
         return unsafe {
-            // Allocate
-            let frame_ptr = std::alloc::alloc_zeroed(layout) as *mut EchonetFrame;
-            if frame_ptr.is_null() {
+            // Allocate. The frame pointer is a standard pointer and does not contain size informaiton.
+            let mem_ptr = std::alloc::alloc_zeroed(layout);
+            if mem_ptr.is_null() {
                 std::alloc::handle_alloc_error(layout);
             }
 
-            // Set the standard fields
-            std::ptr::write_unaligned(&raw mut (*frame_ptr).ehd1 as *mut u16, EHD1_ECHONET_LITE | EHD2_FIXED);
-            std::ptr::write_unaligned(&raw mut (*frame_ptr).tid, tid);
+            // Create a fat pointer.
+            let slice_ptr= std::ptr::slice_from_raw_parts_mut(mem_ptr, layout.size());
+            let frame_ptr = slice_ptr as *mut EchonetFrame;
 
-            // Create a fat pointer. Need to treat as u8 because of the arguments to slice_from_raw_parts_mut.
-            let slice_ptr= std::ptr::slice_from_raw_parts_mut(frame_ptr as *mut u8, layout.size());
+            // Set the standard fields
+            std::ptr::write_unaligned(&raw mut (*frame_ptr).ehd1 as *mut u16, (EHD1_ECHONET_LITE | EHD2_FIXED).to_be());
+            std::ptr::write_unaligned(&raw mut (*frame_ptr).tid, tid.to_be());
+
             // Wrap the raw pointer in a Box for safe ownership and automatic dropping
-            Box::from_raw(slice_ptr as *mut EchonetFrame)
+            Box::from_raw(frame_ptr)
         };
     }
 
@@ -187,38 +222,96 @@ impl EchonetFrame {
         let properties_size: usize = 3; // TBC
         let mut frame_box = Self::create_frame(None, properties_size);
         let frame_ptr = &raw mut *frame_box;
+        println!("Pointer Size info: {}", std::mem::size_of_val(&*frame_box));
 
         let object_spec = [EOJ_CLASS_GROUP_PROFILE, EOJ_CLASS_GROUP_PROFILE_NODE_PROFILE, EOJ_CLASS_GROUP_PROFILE_NODE_PROFILE_GENERAL_NODE];
         unsafe {
             // FIXME: Figure 14.4
             std::ptr::write_unaligned(&raw mut (*frame_ptr).edata.seoj, object_spec);
             std::ptr::write_unaligned(&raw mut (*frame_ptr).edata.deoj, object_spec);
+            std::ptr::write_unaligned(&raw mut (*frame_ptr).edata.esv, ESV_RESPONSE_INF);
             // FIXME
             /*
             frame.edata.esv = 0x73;
             frame.edata.opc = 0x01;
             frame.edata.properties[0].epc = 0xD5;
-            frame.edata.properties[0].pdc = 0x01?;
-            frame.edata.properties[0].edc = 0x01?;*/            
+            frame.edata.properties[0].pdc = 0x??; // depends on length in edt. See para 6.11.1. Likely this is zero since we only have the node profile and not device profile.
+            // Do we want to create a dummy controller class through? Might be an idea, since we only need to send 
+            frame.edata.properties[0].edt = 0x01?; // Instance list information code */
+            // frame_ptr.add_property(...) <- checks the size, increments the properties and appends.          
         }
 
         return frame_box;
-    } 
+    }
 
+    /// Get the actual packet length. Cannot use the allocated size as it contains padding which will add extra to the length
+    pub fn len(&self) -> usize {
+        // Use the caulcated size of header, and access the number of processing entities. Need to iterate through the block
+        // which has to be done manually as each is varying size.
+        let actual: usize = ECHONETFRAME_SIZE;
+
+        // Get the number of properties and then calcualte the size of each
+        let opc_pointer = &raw const self.edata.opc;
+        let opc = unsafe { opc_pointer.read_unaligned() };
+
+        for i in 0..opc {
+            unimplemented!();
+        }
+
+        return actual;
+    }
+}
+
+/// Utility function to display raw data.
+fn display_raw(f: &mut std::fmt::Formatter<'_>, data: &[u8], data_len: usize) -> std::fmt::Result {
+        let mut buffer: String = String::with_capacity(100);
+        println!("Scanning over {} bytes", data_len);
+        f.write_str("\nRaw packet:\n")?;
+
+        // Iterate over data
+        for i in 0..data_len {
+            if i % 16 == 0 {
+                buffer.write_fmt(format_args!(" {:08x}:", i))?;
+            }
+
+            buffer.write_fmt(format_args!(" {:02x}", data[i]))?;
+            if i % 16 == 7 {
+                buffer.write_str("  ")?;
+            }
+
+            if i % 16 == 15 {
+                buffer.push('\n');
+                f.write_str(&buffer)?;
+                buffer.clear();
+            }
+        }
+        
+        if !buffer.is_empty() {
+            buffer.push('\n');
+        }
+        f.write_str(&buffer)
 }
 
 /// Display for packets
 impl std::fmt::Display for EchonetFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "TODO: display packet")
+        write!(f, "EchonetFrame(tid={:x}", u16::from_be(get_value!(self, tid)))
     }
 }
 
+/// Display for debug
 impl std::fmt::Debug for EchonetFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let str = "Bla".to_string();
         f.debug_struct("EchonetFrame")
-            .field("field1", &str)
-            .finish()
+            .field("ehd1", &format_args!("0x{:x}", &get_value!(self, ehd1)))
+            .field("ehd2", &format_args!("0x{:x}", &get_value!(self, ehd2)))
+            .field("tid", &format_args!("0x{:x}", &u16::from_be(get_value!(self, tid))))
+            .field("edata.seoj", &format_args!("0x{:x}", &get_value!(self, ehd1)))
+            .finish()?;
+
+        let data_size = std::cmp::min(std::mem::size_of_val(self), self.len());
+        let data = self as *const EchonetFrame as *const [u8];
+        display_raw(f, unsafe { &*data }, data_size)
     }
 }
+

@@ -1,0 +1,130 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/26.1.1 Chrome/132.0.6834.210 Electron/34.3.3 Safari/537.36" version="26.1.1">
+  <diagram name="Page-1" id="NTyJIwC_4yyh-IFXTaLF">
+    <mxGraphModel dx="1434" dy="1676" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-1" value="Socket&amp;nbsp; data adapter" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="360" y="440" width="320" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-2" value="USB data adapter" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="720" y="440" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-4" value="Raw network sockets" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="360" y="720" width="320" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-5" value="&lt;h1 style=&quot;margin-top: 0px;&quot;&gt;Network Threads&lt;/h1&gt;&lt;p&gt;Listen to multiple sockets. Need to record the protocol (socket) interface and source address because it could be using link-local. This is stored as the device address&lt;/p&gt;" style="text;html=1;whiteSpace=wrap;overflow=hidden;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="180" y="540" width="280" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-6" value="" style="endArrow=classic;startArrow=classic;html=1;rounded=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" edge="1" parent="1" source="osm3N-SdJkY_QjZSTnFf-4" target="osm3N-SdJkY_QjZSTnFf-1">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="560" y="660" as="sourcePoint" />
+            <mxPoint x="610" y="610" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-7" value="&lt;font style=&quot;font-size: 10px;&quot;&gt;Network async threads.&lt;/font&gt;&lt;div style=&quot;text-align: left;&quot;&gt;&lt;font style=&quot;font-size: 8px;&quot;&gt;Listen to network, get zero or one response&lt;/font&gt;&lt;/div&gt;&lt;div style=&quot;text-align: left;&quot;&gt;&lt;font style=&quot;font-size: 8px;&quot;&gt;Events from the stack - how to select/send. If we send a request, should we wait for a response... Let&#39;s assume that outbound requests are not sent to multicast? But what about notification events? Do we need to classify into response expected/not expected?&lt;/font&gt;&lt;/div&gt;" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="530" y="570" width="190" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-8" value="Raw Serial devices" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="720" y="720" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-9" value="" style="endArrow=classic;startArrow=classic;html=1;rounded=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" edge="1" parent="1" source="osm3N-SdJkY_QjZSTnFf-8" target="osm3N-SdJkY_QjZSTnFf-2">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="530" y="730" as="sourcePoint" />
+            <mxPoint x="530" y="490" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-10" value="&lt;font style=&quot;font-size: 10px;&quot;&gt;USB async threads.&lt;/font&gt;&lt;div style=&quot;text-align: left;&quot;&gt;&lt;span style=&quot;font-size: 8px;&quot;&gt;Do have events coming from both sides. Assume no bridge between socket and USB.&lt;/span&gt;&lt;/div&gt;" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="810" y="570" width="190" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-11" value="Only route-b supported" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="810" y="498" width="150" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-12" value="Echonet Lite Wire" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="360" y="360" width="520" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-13" value="Filter non-echonet data here&lt;div&gt;These are not threads, just methods to package/unpackage&lt;/div&gt;" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="880" y="440" width="340" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-14" value="&lt;h1 style=&quot;margin-top: 0px;&quot;&gt;USB Threads&lt;/h1&gt;&lt;p&gt;Listen to multiple sockets. Need to record the protocol (serial), device and source address because it could be using link-local. This is stored as the device address&lt;/p&gt;" style="text;html=1;whiteSpace=wrap;overflow=hidden;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="540" width="280" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-15" value="&lt;h1 style=&quot;margin-top: 0px;&quot;&gt;Wire adapter&lt;/h1&gt;&lt;p&gt;Turns middleware events and changes into routed ECHONET Lite wire data to be sent.&amp;nbsp; Can be in response to a request, or initiated though an announcement.&lt;/p&gt;" style="text;html=1;whiteSpace=wrap;overflow=hidden;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="900" y="320" width="280" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-16" value="Echonet Lite Middleware" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="360" y="120" width="520" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-17" value="&lt;h1 style=&quot;margin-top: 0px;&quot;&gt;Middleware&lt;/h1&gt;&lt;p&gt;Stores the state data. Has both the own device nodes (profile and controller class), and a copy of each node&#39;s current state/capabilities (general vs tx; which operations are supported; booting etc), the address, and last data?&lt;/p&gt;&lt;p&gt;When a device announces/registers, then query the supported classes. What about devices that have announced before we joined the network?&lt;/p&gt;&lt;p&gt;In general, state changes from the echonet side should push events to the Home Assistant side, and visa versa&lt;/p&gt;&lt;p&gt;Is the middleware multi-threads safe and or do we the main thread process series of events from the IO threads.&amp;nbsp;&amp;nbsp;&lt;/p&gt;" style="text;html=1;whiteSpace=wrap;overflow=hidden;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="910" y="100" width="530" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-18" value="" style="endArrow=classic;startArrow=classic;html=1;rounded=0;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.308;entryY=1;entryDx=0;entryDy=0;entryPerimeter=0;strokeColor=default;align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=11;fontColor=default;labelBackgroundColor=default;" edge="1" parent="1" source="osm3N-SdJkY_QjZSTnFf-1" target="osm3N-SdJkY_QjZSTnFf-12">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="530" y="730" as="sourcePoint" />
+            <mxPoint x="520" y="420" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-19" value="" style="endArrow=classic;startArrow=classic;html=1;rounded=0;exitX=0.5;exitY=0;exitDx=0;exitDy=0;strokeColor=default;align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=11;fontColor=default;labelBackgroundColor=default;entryX=0.846;entryY=1;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="osm3N-SdJkY_QjZSTnFf-2" target="osm3N-SdJkY_QjZSTnFf-12">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="530" y="450" as="sourcePoint" />
+            <mxPoint x="800" y="410" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-20" value="" style="endArrow=classic;startArrow=classic;html=1;rounded=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;strokeColor=default;align=center;verticalAlign=middle;fontFamily=Helvetica;fontSize=11;fontColor=default;labelBackgroundColor=default;" edge="1" parent="1" source="osm3N-SdJkY_QjZSTnFf-12" target="osm3N-SdJkY_QjZSTnFf-16">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="530" y="450" as="sourcePoint" />
+            <mxPoint x="530" y="410" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-21" value="Events" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="610" y="328" width="60" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-22" value="Messages" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="530" y="405" width="80" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-23" value="Home Assistant Adapter" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="360" y="40" width="520" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-24" value="Web Services socket adpater" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="360" y="-40" width="520" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-26" value="" style="endArrow=classic;startArrow=classic;html=1;rounded=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="osm3N-SdJkY_QjZSTnFf-23" target="osm3N-SdJkY_QjZSTnFf-24">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="940" y="290" as="sourcePoint" />
+            <mxPoint x="990" y="240" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-27" value="" style="endArrow=classic;startArrow=classic;html=1;rounded=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" edge="1" parent="1" source="osm3N-SdJkY_QjZSTnFf-16" target="osm3N-SdJkY_QjZSTnFf-23">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="630" y="50" as="sourcePoint" />
+            <mxPoint x="630" y="10" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-28" value="Messages (register device, online/offline, state change etc)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="620" y="10" width="340" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-29" value="Home Assistant Integration (runs in HA)" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="360" y="-120" width="520" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-30" value="Network async thread" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="471" y="6" width="140" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-31" value="&lt;h1 style=&quot;margin-top: 0px;&quot;&gt;Main Thread&lt;/h1&gt;&lt;p&gt;The main thread sits and waits for a shutdown message, and if found, does a graceful shutdown, including an announcement to go offline to HA/ECHONET. If IO threads see this, then should shut down.&lt;/p&gt;&lt;p&gt;Do we need one IO thread with async events on, or multiple IO threads for different parts?&lt;/p&gt;&lt;p&gt;Assume that events in/out of the middleware all have the same structure for sanity.&lt;/p&gt;" style="text;html=1;whiteSpace=wrap;overflow=hidden;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="50" y="145" width="280" height="235" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-32" value="Events" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="630" y="88" width="60" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-37" value="" style="endArrow=classic;startArrow=classic;html=1;rounded=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1" source="osm3N-SdJkY_QjZSTnFf-29" target="osm3N-SdJkY_QjZSTnFf-24">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="1010" y="240" as="sourcePoint" />
+            <mxPoint x="1060" y="190" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="osm3N-SdJkY_QjZSTnFf-38" value="Websocket. How to secure - shared key?" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="620" y="-70" width="240" height="30" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

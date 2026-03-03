@@ -1,6 +1,7 @@
 //! Main entrypoint for the EchoNet Lite to MQTT converter
 extern crate macros;
 mod config;
+mod connectors;
 mod middleware;
 
 use clap::Parser;
@@ -82,12 +83,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     // then all interfaces, else only ones listed in the configuration. Start
     // by getting a list of interfaces. This is done here, before the network
     // startup so that we can detect configuration errors.
-    //let _ = net::get_network_interfaces().await;
+    let interfaces = connectors::echonet::get_network_interfaces(&config.network).await?;
+    connectors::echonet::open_sockets(&interfaces).await?;
 
     // Startup the Middleware. We only do this after all the channels have been
     // setup and any authentication performed.
     let middleware = Middleware::new(1, broadcast_tx);
-    middleware.initialise().await?;
+    middleware.startup().await?;
     
     // Run the main processing loop
     loop {
@@ -127,7 +129,111 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                 }
             }
         }
-    }    
+    }   
+
+    // Close all the sockets
+    connectors::echonet::close_sockets(&interfaces).await?; 
     
     Ok(())
 }
+
+
+/* Approch 1
+
+use tokio::net::TcpStream;
+use tokio_stream::StreamExt;
+use futures::stream::SelectAll;
+use tokio::io::AsyncReadExt;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut socket_list = Vec::new();
+    // Assuming you have a list of addresses
+    let addrs = vec!["127.0.0.1:8080", "127.0.0.1:8081"]; 
+
+    for addr in addrs {
+        let stream = TcpStream::connect(addr).await?;
+        // Map each socket to a stream of packets/data
+        socket_list.push(Box::pin(async_stream::stream! {
+            let mut buf = vec![0; 1024];
+            loop {
+                // Simplified reading logic
+                yield stream.read(&mut buf).await;
+            }
+        }));
+    }
+
+    // Combine all streams
+    let mut all_streams = SelectAll::new();
+    for socket in socket_list {
+        all_streams.push(socket);
+    }
+
+    // Select! over the merged stream
+    loop {
+        tokio::select! {
+            Some(result) = all_streams.next() => {
+                println!("Received data: {:?}", result);
+            }
+        }
+    }
+}
+
+*/
+
+/* Approach 2
+
+use tokio::net::UdpSocket;
+use tokio::time::{interval, Duration};
+use futures::stream::{FuturesUnordered, StreamExt};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    // 1. Setup multiple sockets
+    let socket1 = Arc::new(UdpSocket::bind("127.0.0.1:8081").await?);
+    let socket2 = Arc::new(UdpSocket::bind("127.0.0.1:8082").await?);
+    let sockets = vec![socket1, socket2];
+
+    // 2. Create interval timer
+    let mut interval = interval(Duration::from_secs(1));
+
+    // 3. Prepare futures for sockets
+    let mut futures = FuturesUnordered::new();
+    for socket in sockets {
+        let sock = socket.clone();
+        futures.push(async move {
+            let mut buf = [0; 1024];
+            let (len, addr) = sock.recv_from(&mut buf).await?;
+            Ok::<(usize, std::net::SocketAddr, Arc<UdpSocket>), std::io::Error>((len, addr, sock))
+        });
+    }
+
+    loop {
+        tokio::select! {
+            // Handle socket messages
+            Some(result) = futures.next() => {
+                match result {
+                    Ok((len, addr, sock)) => {
+                        println!("Received {} bytes from {}", len, addr);
+                        // Repush to keep listening on this socket
+                        let s = sock.clone();
+                        futures.push(async move {
+                            let mut buf = [0; 1024];
+                            let (len, addr) = s.recv_from(&mut buf).await?;
+                            Ok::<(usize, std::net::SocketAddr, Arc<UdpSocket>), std::io::Error>((len, addr, s))
+                        });
+                    }
+                    Err(e) => eprintln!("Error: {}", e),
+                }
+            }
+            // Handle timer
+            _ = interval.tick() => {
+                println!("Timer ticked");
+            }
+        }
+    }
+}
+
+
+*/

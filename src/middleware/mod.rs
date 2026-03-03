@@ -585,16 +585,15 @@ impl Middleware {
         };
         log::info!("Middleware initialised (self node: 1 profile object, {} device objects)", middleware.self_node.device_objects.len());
 
-        // Set the gateway to be online.
-
-        // Return the middleware instance
         middleware
     }
 
     /// Initialise the middleware
-    pub async fn initialise(&self) -> Result<(), api::MiddlewareError> {
-        // Create an announcement event
+    pub async fn startup(&self) -> Result<(), api::MiddlewareError> {
+        // Create an announcement event (initial)
         self.broadcast_tx.send(events::Event::Startup).await?;
+
+        // Set the bridge to online and send an update
         
         // Send an announcement message
         self.broadcast_tx.send(events::Event::Announce).await?;
@@ -606,6 +605,8 @@ impl Middleware {
     pub async fn shutdown(&self) -> Result<(), api::MiddlewareError> {
         log::info!("Middleware shutdown started");
 
+        // Set the bridge to offline.
+
         // Send an annoucement of the middleware shutting down.
 
         // Shutdown
@@ -614,6 +615,3 @@ impl Middleware {
         Ok(())
     }
 }
-
-
-// TODO: need a common constants area for echonet.

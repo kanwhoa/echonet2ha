@@ -38,19 +38,21 @@ pub struct AppMqttConfiguration {
 #[derive(Debug, Deserialize)]
 pub struct AppNetworkConfiguration {
     #[serde(default)]
-    interfaces: Option<Vec<AppInterfaceConfiguration>>
+    pub interfaces: Option<Vec<AppInterfaceConfiguration>>,
+    #[serde(default)]
+    pub skip_ptp: bool
 }
 
 /// Interface configuration. 
 #[derive(Debug, Deserialize)]
 pub struct AppInterfaceConfiguration {
-    name: String,
+    pub name: String,
     #[serde(default)]
-    port: u16,
+    pub port: u16,
     #[serde(default)]
-    ipv4: bool,
+    pub ipv4: bool,
     #[serde(default)]
-    ipv6: bool,
+    pub ipv6: bool,
 }
 
 
@@ -81,7 +83,8 @@ impl Default for AppMqttConfiguration {
 impl Default for AppNetworkConfiguration {
     fn default() -> Self {
         AppNetworkConfiguration {
-            interfaces: None
+            interfaces: None,
+            skip_ptp: true
         }
     }
 }

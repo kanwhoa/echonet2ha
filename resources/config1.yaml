@@ -14,5 +14,6 @@ mqtt:
   # credentials
   # certificate
   # truststore
+# Network configuration
 network:
-  # Don't specify any interfaces to include all.
+  skip_ptp: true

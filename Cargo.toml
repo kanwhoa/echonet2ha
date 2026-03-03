@@ -22,7 +22,7 @@ documentation = "https://to.be.defined/"
 chrono = "0.4.43"
 clap = { version = "4.5.48", features = ["derive"] }
 log = "0.4.29"
-nix = { version = "0.30.1", features = ["default", "net"] }
+nix = { version = "0.31.1", features = ["default", "net"] }
 proc-macro2 = "1.0.106"
 quote = "1.0.44"
 rand = "0.10.0"

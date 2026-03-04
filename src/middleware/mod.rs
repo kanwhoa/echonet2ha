@@ -8,7 +8,7 @@ const MANUFACTURER_UNREGISTERED: [u8; 3] = [0xff, 0xff, 0xff];
 
 // Node types
 const NODE_TYPE_GENERAL: u8 = 0x01;
-const NODE_TYPE_TRANSMIT_ONLY: u8 = 0x01;
+const NODE_TYPE_TRANSMIT_ONLY: u8 = 0x02;
 
 // EPC properties
 const EPC_OPERATING_STATUS: u8 = 0x80;
@@ -37,7 +37,6 @@ const EPC_OPERATION_STATUS_OFF: u8 = 0x31;
 const EPC_FAULT_ENCOUNTERED: u8 = 0x41;
 const EPC_FAULT_NOT_ENCOUNTERED: u8 = 0x42;
 
-
 /// Node physical addresses
 #[derive(PartialEq, Eq, Debug)]
 enum NodeAddress {
@@ -50,9 +49,10 @@ enum NodeAddress {
 
 // Node capabilities
 #[derive(PartialEq, Eq, Debug)]
+#[repr(u8)]
 enum NodeType {
-    General,
-    TransmitOnly
+    General = NODE_TYPE_GENERAL,
+    TransmitOnly = NODE_TYPE_TRANSMIT_ONLY
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -412,30 +412,20 @@ const NODE_PROPERTY_MANUFACTURER_CODE: NodeProperty<Vec<u8>> = NodeProperty::new
     |np, internal| to_vec(np, internal, |buf| buf.len() == 3),
 );
 
-/// ECHONET Lite Object Specification (in-node addressing)
-/// A node can contain multiple objects which are addressable through the "ECHONET Lite Object Spefification" (EOJ)
-/// * Device Objects. These contain state and properties as per "APPENDIX Detailed Requirements for ECHONET Device objects"
-/// * Profile Objects. These
-struct EOJ {
-    class_group_code: u8, // E.g. sensors, home equipment, etc
-    class_code: u8, // The specific type, e.g. a presence sensor
-    instance_code: u8 // The instance number of the presence sensor, for example devices that have both PIR and mmWave 
-}
-
 /// ECHONET Object representation (both device and profile)
 struct NodeObject {
-    eoj: EOJ,
+    eoj: api::EOJ,
     properties: Vec<Box<dyn NodePropertyGenericType>>
 }
 
 impl NodeObject {
     /// Create a device object
-    fn device(class_group_code: u8, class_code: u8, instance: u8) -> Self {
+    fn device(group_class: &api::GroupClass, instance: u8) -> Self {
         // All objects has a standard set of superclass objects
         // APPENDIX Detailed Requirements for ECHONET Device objects: Device Object Super Class Requirements
 
         NodeObject {
-            eoj: EOJ {class_group_code: class_group_code, class_code: class_code, instance_code: instance},
+            eoj: api::EOJ::from_groupclass_instance(group_class, instance),
             properties: vec![
             ]
         }
@@ -457,14 +447,10 @@ impl NodeObject {
 
         // Construct the node object
         NodeObject {
-            eoj: EOJ {
-                class_group_code: api::CLASS_PROFILE_NODE_PROFILE.class_group_code,
-                class_code: api::CLASS_PROFILE_NODE_PROFILE.class_code,
-                instance_code: match r#type {
-                    NodeType::General => NODE_TYPE_GENERAL,
-                    NodeType::TransmitOnly => NODE_TYPE_TRANSMIT_ONLY
-                }
-            },
+            eoj: api::EOJ::from_groupclass_instance(
+                &api::CLASS_PROFILE_NODE_PROFILE,
+                r#type as u8
+            ),
             properties: vec![
                 // Superclass specifications (6.10.1 Overview of Profile Object Super Class Specifications)
                 Box::new(NODE_PROPERTY_FAULT_STATUS.clone_with_canonical_value(&false).unwrap()),
@@ -577,7 +563,7 @@ impl Middleware {
                 r#type: NodeType::General,
                 profile_object: NodeObject::profile(NodeType::General, manufacturer_code, instance),
                 device_objects: vec![
-                    NodeObject::device(api::CLASS_CONTROL_CONTROLLER.class_group_code, api::CLASS_CONTROL_CONTROLLER.class_code, 1)
+                    NodeObject::device(&api::CLASS_CONTROL_CONTROLLER, 1)
                 ]
             },
             nodes: Vec::new(),
@@ -592,11 +578,14 @@ impl Middleware {
     pub async fn startup(&self) -> Result<(), api::MiddlewareError> {
         // Create an announcement event (initial)
         self.broadcast_tx.send(events::Event::Startup).await?;
-
-        // Set the bridge to online and send an update
         
         // Send an announcement message
-        self.broadcast_tx.send(events::Event::Announce).await?;
+        self.broadcast_tx.send(events::Event::Announce(
+            self.self_node.profile_object.eoj.clone(),
+            api::EOJ::from_groupclass_instance(&api::CLASS_PROFILE_NODE_PROFILE, 0x01)
+        )).await?;
+
+        // Set the bridge as online and account that status
 
         Ok(())
     }

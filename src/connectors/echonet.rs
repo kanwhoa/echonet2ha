@@ -363,12 +363,9 @@ pub async fn close_sockets(ilas: &Vec<InterfaceListenAddresses>) -> Result<(), C
     for ila in ilas.iter() {
         for is in ila.sockets.iter() {
             log::info!("Closing {}:{}{} on interface '{}'", is.address.ip(), is.address.port(), if is.multicast_selected {" with multicast"} else {""}, ila.interface_name);
-
-            // Create the socket
-            let socket: UdpSocket = UdpSocket::bind(is.address).await?;
-
+            
             // Enable multicast
-            if is.multicast_selected {
+            if let Some(socket) = is.socket.borrow().as_ref() && is.multicast_selected {
                 if let IpAddr::V4(ip) = is.address.ip() {
                     socket.leave_multicast_v4(MULTICAST_IPV4, ip)?;
                 } else if matches!(is.address, SocketAddr::V6(_)) {
@@ -376,10 +373,22 @@ pub async fn close_sockets(ilas: &Vec<InterfaceListenAddresses>) -> Result<(), C
                 }
             }
 
-            // Save
+            // Relase & close
             *is.socket.borrow_mut() = None;
         }
     }
 
     Ok(())
 }
+
+/// Convert a message to a wire format
+pub fn to_wire(event: crate::middleware::events::Event) -> Vec<u8> {
+    match event {
+
+/*        crate::middleware::events::Event::Announce(seoj, deoj) => {
+        }*/
+        _ => Vec::new()
+    }
+}
+
+// FIXME: turn this into a module/struct, implementing the connectable trait. Keep the socket futures internall

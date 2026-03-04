@@ -112,8 +112,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
 
             // Recieved a broadcast message, advertise on all channels (maybe)
             // TODO: Do we need to handle None()? I.e. a comms failure, and shutdown
-            Some(msg) = broadcast_rx.recv() => {
-                match msg {
+            Some(event) = broadcast_rx.recv() => {
+                match event {
                     Event::Startup => {
                         log::debug!("Middleware startup complete");
                     }
@@ -122,10 +122,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                         // TODO: how to make sure the queue has been flushed?
                         break;
                     }
-                    Event::Announce => {
-                        // FIXME: need the address, in this case, broadcast and data
-                        // connector::echonet::to_wire(msg)???? - Will this process all messages?
-                        log::info!("Performing announce");
+                    Event::Announce(_, _) => {
+                        // Broadcast announcement, send to all multicast sockets.
+                        log::info!("Performing: {}", event);
+                        connectors::echonet::to_wire(event).await;
                     }
                 }
             }

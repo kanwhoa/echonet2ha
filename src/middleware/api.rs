@@ -21,6 +21,38 @@ pub const EOJ_CLASS_GROUP_AV: u8 = 0x06;
 pub const EOJ_CLASS_GROUP_PROFILE: u8 = 0x0e;
 pub const EOJ_CLASS_GROUP_USER: u8 = 0x0f;
 
+const UNKNOWN: &str = "Unknown";
+
+/// ECHONET Lite Object Specification (in-node addressing)
+/// A node can contain multiple objects which are addressable through the "ECHONET Lite Object Spefification" (EOJ)
+/// * Device Objects. These contain state and properties as per "APPENDIX Detailed Requirements for ECHONET Device objects"
+/// * Profile Objects. These define the device capabiltiies and pointers into the device objects
+#[derive(Clone, Copy, Debug)]
+pub struct EOJ {
+    class_group_code: u8, // E.g. sensors, home equipment, etc
+    class_code: u8, // The specific type, e.g. a presence sensor
+    instance_code: u8 // The instance number of the presence sensor, for example devices that have both PIR and mmWave 
+}
+
+/// Implementation methods for EOJ
+impl EOJ {
+    pub fn from_groupclass_instance(group_class: &GroupClass, instance: u8) -> Self {
+        Self {
+            class_group_code: group_class.class_group_code,
+            class_code: group_class.class_code,
+            instance_code: instance,
+        }
+    }
+}
+
+impl std::fmt::Display for EOJ {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:02x}{:02x}{:02x}", self.class_group_code, self.class_code, self.instance_code)
+    }
+}
+
+/// Holder the group and class (first two bytees of the EOJ)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GroupClass {
     pub class_group_code: u8, // E.g. sensors, home equipment, etc
     pub class_code: u8, // The specific type, e.g. a presence sensor
@@ -31,6 +63,52 @@ pub struct GroupClass {
 pub const CLASS_CONTROL_CONTROLLER: GroupClass = GroupClass {class_group_code: EOJ_CLASS_GROUP_CONTROL, class_code: 0xff};
 /// Profile class
 pub const CLASS_PROFILE_NODE_PROFILE: GroupClass = GroupClass {class_group_code: EOJ_CLASS_GROUP_PROFILE, class_code: 0xf0};
+
+impl GroupClass {
+    /// Genernate a displayable version of the group/class
+    pub fn to_display(&self) -> (&'static str, &'static str) {
+        let exact = match self {
+            &CLASS_CONTROL_CONTROLLER => Some((self.get_group_display_name().unwrap(), "Controller")),
+            &CLASS_PROFILE_NODE_PROFILE => Some((self.get_group_display_name().unwrap(), "Node Profile")),
+            _ => None
+        };
+
+        exact.or_else(|| Some( (self.get_group_display_name().or_else(||Some(UNKNOWN)).unwrap(), UNKNOWN)) ).unwrap()
+    }
+
+    /// Get the display name for a group
+    fn get_group_display_name(&self) -> Option<&'static str> {
+        match self.class_group_code {
+            EOJ_CLASS_GROUP_SENSOR => Some("Sensor"),
+            EOJ_CLASS_GROUP_AIRCON => Some("Air Conditioning"),
+            EOJ_CLASS_GROUP_FACILITY => Some("Facility"),
+            EOJ_CLASS_GROUP_HOUSEWORK => Some("Housework"),
+            EOJ_CLASS_GROUP_HEALTH => Some("Health"),
+            EOJ_CLASS_GROUP_CONTROL => Some("Control"),
+            EOJ_CLASS_GROUP_AV => Some("Audio Visual"),
+            EOJ_CLASS_GROUP_PROFILE => Some("Profile"),
+            EOJ_CLASS_GROUP_USER => Some("User"),
+            _ => None
+        }
+    }
+
+}
+
+impl std::fmt::Display for GroupClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let (group_desc, class_desc) = self.to_display();
+        write!(f, "Group '{}' Class '{}'", group_desc, class_desc)
+    }
+}
+
+impl From<&EOJ> for GroupClass {
+    fn from(value: &EOJ) -> Self {
+        Self {
+            class_group_code: value.class_group_code,
+            class_code: value.class_code
+        }
+    }
+}
 
 /// EPC errors
 #[derive(Debug)]

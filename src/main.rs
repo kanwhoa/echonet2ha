@@ -124,6 +124,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                     }
                     Event::Announce => {
                         // FIXME: need the address, in this case, broadcast and data
+                        // connector::echonet::to_wire(msg)???? - Will this process all messages?
                         log::info!("Performing announce");
                     }
                 }

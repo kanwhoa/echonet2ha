@@ -1,6 +1,6 @@
 //! Network related functions and structs
 use nix::{self, ifaddrs::InterfaceAddress, net::if_::{if_nametoindex, InterfaceFlags}, sys::socket::{AddressFamily, SockaddrLike, SockaddrStorage}};
-use std::ffi::CString;
+use std::{ffi::CString, ops::Deref};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use tokio::net::UdpSocket;
 use super::error::ConnectorError;
@@ -12,41 +12,57 @@ const MULTICAST_IPV6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
 
 
 /// Keep track of the open sockets.
-pub struct InterfaceSocket<T> {
-    /// A unique identifier for the interface address
-    pub interface_address_index: usize,
+pub struct InterfaceSocket {
     /// The network address. Can be either V4 or V6. Need to keep the Sin structure to get the scope id.
-    pub address: T,
+    pub address: SocketAddr,
     /// The network address. Can be either V4 or V6. Need to keep the Sin structure to get the scope id.s
-    pub network: T,
+    pub network: SocketAddr,
     /// The netmask. Store as an address to avoid constant re-expansion.
-    pub netmask: T,
+    pub netmask: SocketAddr,
+    /// True if multicast is supported on this interface address
+    pub multicast_capable: bool,
+    /// True if multicast is selected for this interface addresss
+    pub multicast_selected: bool,
     /// The bound socket
     pub socket: std::cell::RefCell<Option<tokio::net::UdpSocket>>
 }
 
+impl PartialEq for InterfaceSocket {
+    fn eq(&self, other: &Self) -> bool {
+        self.address.ip() == other.address.ip()
+    }
+}
+
+impl Eq for InterfaceSocket {}
+
+impl std::hash::Hash for InterfaceSocket {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.address.hash(state);
+    }
+}
+
 /// To keep track of the listen addresses and open sockets
 pub struct InterfaceListenAddresses {
+    /// The OS interface index (for OS reference)
+    interface_index: u32,
     /// The interface that this is referring to
     pub interface_name: String,
-    /// The interface index (for sorting/referencing)
-    interface_index: usize,
-    /// The OS interface index (for OS reference)
-    interface_id: u32,
+    // The list of interface sockets
+    pub sockets: Vec<InterfaceSocket>,
+}
 
-    /// Indicate if IPv4 is enabled for this interface
-    pub ipv4_enabled: bool,
-    /// A pointer to which interface is recieving multicast
-    pub ipv4_multicast_interface_address_index: Option<usize>,
-    /// A list of all the bound sockets on this interface
-    pub ipv4_sockets: Vec<InterfaceSocket<SocketAddrV4>>,
+impl PartialEq for InterfaceListenAddresses {
+    fn eq(&self, other: &Self) -> bool {
+        self.interface_index == other.interface_index
+    }
+}
 
-    /// Indicate if IPv6 is enabled for this interface
-    pub ipv6_enabled: bool,
-    /// A pointer to which interface is recieving multicast
-    pub ipv6_multicast_interface_address_index: Option<usize>,
-    /// A list of all the bound sockets on this interface
-    pub ipv6_sockets: Vec<InterfaceSocket<SocketAddrV6>>,
+impl Eq for InterfaceListenAddresses {}
+
+impl std::hash::Hash for InterfaceListenAddresses {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.interface_index.hash(state);
+    }
 }
 
 /// Convert an address/netmask to a network address.
@@ -79,14 +95,15 @@ fn to_network(address: SocketAddr, netmask: SocketAddr) -> Result<SocketAddr, Co
 /// Convert from Nix structures to std::net structures
 /// Ugly... very ugly
 fn sockaddr_nix_to_stdnet(maybe_storage: Option<SockaddrStorage>, port: u16) -> Option<SocketAddr> {
-    if let Some(storage) = maybe_storage {
+    maybe_storage.and_then(|storage|
         if let Some(sin) = storage.as_sockaddr_in() {
-            return Some(SocketAddrV4::new(sin.ip(), port).into());
+            Some(SocketAddrV4::new(sin.ip(), port).into())
         } else if let Some(sin) = storage.as_sockaddr_in6() {
-            return Some(SocketAddrV6::new(sin.ip(), port, sin.flowinfo(), sin.scope_id()).into());
+            Some(SocketAddrV6::new(sin.ip(), port, sin.flowinfo(), sin.scope_id()).into())
+        } else {
+            None
         }
-    }
-    None
+    )
 }
 
 /// Copied until is_global is stable
@@ -147,11 +164,11 @@ pub const fn is_globalish6(obj: &Ipv6Addr) -> bool {
 /// interface only reply to that interface. For an interface to be selected
 /// it should have both the interface and an address of the IP version active.
 pub async fn get_network_interfaces(net_config: &crate::config::AppNetworkConfiguration) -> Result<Vec<InterfaceListenAddresses>, ConnectorError> {
-    let mut interfaces: std::collections::HashMap<String, std::collections::HashMap<AddressFamily, Vec<InterfaceAddress>>> = std::collections::HashMap::new();
     let mut maybe_only_interfaces: Option<std::collections::HashMap<&str, &crate::config::AppInterfaceConfiguration>> = None;
-    let mut ilas: Vec<InterfaceListenAddresses> = Vec::new();
+    let mut ilas: std::collections::HashSet<InterfaceListenAddresses> = std::collections::HashSet::new();
 
-    // Create a list of interfaces to filter by
+    // Create a list of interfaces to filter by. If maybe_only_interfaces is Some(_) then, one or more network interfaces are
+    // specified, else all interfaces.
     if let Some(interfaces) = &(net_config.interfaces) {
         if interfaces.len() > 0 {
             maybe_only_interfaces = Some(interfaces.iter().map(|x| (x.name.as_ref(), x)).collect());
@@ -170,40 +187,66 @@ pub async fn get_network_interfaces(net_config: &crate::config::AppNetworkConfig
 
         // Skip any PTP links
         if net_config.skip_ptp && ifaddr.flags.contains(InterfaceFlags::IFF_POINTOPOINT) {
-            log::debug!("Skipping address on point-to-point interface '{}'", interface_name);
+            log::debug!("Skipping address on interface '{}' as skip_ptp is set", interface_name);
             continue;
         }
 
-        // Filter any ifaddr which does not have an address or is loop back.
-        if let Some(ipaddr) = match ifaddr.address {
-            Some(a) if a.family().is_some_and(|f: AddressFamily| f == AddressFamily::Inet) => Some(IpAddr::V4(a.as_sockaddr_in().unwrap().ip())),
-            Some(a) if a.family().is_some_and(|f: AddressFamily| f == AddressFamily::Inet6) => Some(IpAddr::V6(a.as_sockaddr_in6().unwrap().ip())),
-            _ => continue
-        } {
-            if ipaddr.is_loopback() {
-                continue;
-            }
+        // Check if we have an interface filter active, and this interface is included.
+        if maybe_only_interfaces.as_ref().is_some_and(|hm| !hm.contains_key(interface_name.as_str())) {
+            log::debug!("Skipping address interface '{}' as no configuration", interface_name);
+            continue;
         }
 
-        // Check if we have an interface filter active.
-        if let Some(only_interfaces) = &maybe_only_interfaces {
-            if !only_interfaces.contains_key(&*interface_name) {
-                continue;
-            }
+        // Get the interface configuration (if provided)
+        let maybe_interface_config = maybe_only_interfaces.as_ref().and_then(|e| e.get(interface_name.as_str()).cloned());
+        let port = maybe_interface_config.and_then(|e| Some(e.port)).or_else(|| Some(DEFAULT_PORT)).unwrap();
+        let maybe_address = sockaddr_nix_to_stdnet(ifaddr.address, port);
+        if maybe_address.is_none() {
+            log::debug!("Skipping address interface '{}' as not IPv4 or IPv6", interface_name);
+            continue; // Address is no IPv4 or IPv6
         }
+        let address = maybe_address.unwrap();
+        let family_enabled = maybe_interface_config.and_then(|ic| 
+            if matches!(address, SocketAddr::V4(_)) {
+                Some(ic.ipv4)
+            } else if matches!(address, SocketAddr::V6(_)) {
+                Some(ic.ipv6)
+            } else {
+                None
+            }
+        ).or_else(|| Some(true)).unwrap();
 
-        // Save the interface under the correct family
-        let entry = interfaces.entry(interface_name).or_insert_with(|| {
-            let mut new_map = std::collections::HashMap::new();
-            new_map.insert(AddressFamily::Inet, Vec::new());
-            new_map.insert(AddressFamily::Inet6, Vec::new());
-            new_map
-        });
+        // Check for the family being enabled and a second check for loopback
+        if address.ip().is_loopback() || !family_enabled {
+            continue;
+        }
+        
+        // Get the interface index in case we need it
+        let interface_name_cstr: CString = CString::new(interface_name.as_str()).expect("Null values in interface name");
+        let interface_index = if_nametoindex(interface_name_cstr.as_c_str())?;
 
-        // Save the ifaddr
-        let iface_addresses = entry.get_mut(&ifaddr.address.unwrap().family().unwrap()).unwrap();
-        iface_addresses.push(ifaddr);
-        // TODO: migrate away from the intermediate HashMap
+        // Find the correct interface struct. The API is painful here so have to create a dummy version and then do a contains/insert
+        let temp_ila = InterfaceListenAddresses {
+            interface_index: interface_index,
+            interface_name: interface_name,
+            sockets: Vec::new()
+        };
+        // Need to do a find because value has moved into the hashset.
+        let mut ila = ilas.take(&temp_ila).or_else(|| Some(temp_ila)).unwrap();
+        
+        // Insert the new interface
+        let netmask: SocketAddr = sockaddr_nix_to_stdnet(ifaddr.netmask, 0).unwrap();
+        let is = InterfaceSocket {
+            address: address,
+            netmask: netmask,
+            network: to_network(address, netmask).unwrap(),
+            multicast_capable: ifaddr.flags.contains(InterfaceFlags::IFF_MULTICAST),
+            multicast_selected: false,
+            socket: std::cell::RefCell::new(None)
+        };
+        // Save the socket and re-insert
+        ila.sockets.push(is);
+        ilas.insert(ila);
     }
 
     // An interface can have multiple IP addresses.
@@ -215,182 +258,99 @@ pub async fn get_network_interfaces(net_config: &crate::config::AppNetworkConfig
     // Additionally, we don't want to listen on two addresses in the same /64. In most cases, a SLAAC address will be assigned as the first address, ie. "secured"
     // and other addresses will be temporary addresses. Due to this, we want to assign the multicast listener to the first address on the interface that is link-local.
     // For other addresses, we want to listen for nuicast, but not multicast. This does make things interesting when replying as we potentially need to choose a 
-    // different source address.
+    // different source address. Need to convert to a vector to get mutable references easily.
+    let mut ilas_vec: Vec<InterfaceListenAddresses> = ilas.into_iter().collect();
+    for ila in ilas_vec.iter_mut() {
+        // Find the IPv4 multicast address (if any)
+        let mut socket4_indexes: Vec<(usize, usize)> = ila.sockets.iter()
+            .enumerate()
+            .map(|(index, e)|
+                (
+                    index,
+                    index + if let IpAddr::V4(ip) = e.address.ip() && e.multicast_capable {
+                        1 * (if ip.is_link_local() {1000} else if ip.is_private() {2000} else if is_globalish4(&ip) {3000} else {5000})
+                    } else {
+                        1_000_000
+                    }
+                )
+            )
+            .filter(|&(_, pref)| pref < 1_000_000)
+            .collect();
+        socket4_indexes.sort_by_key(|&(_, pref)| pref);
+        socket4_indexes.get(0).and_then(|&(index, _)| {
+            ila.sockets[index].multicast_selected = true;
+            Some(true)
+        });
 
-    // Sort the interface lists to determine which address to use.
-    for (iface_index, iface) in interfaces.iter_mut().enumerate() {
-        // Get the correct port
-        let port = if let Some(only_interfaces) = &maybe_only_interfaces && only_interfaces.contains_key(iface.0.as_str()) {
-            only_interfaces.get(iface.0.as_str()).unwrap().port
-        } else {
-            DEFAULT_PORT
-        };
-
-        // Get the correct interface id. Should always be successful.
-        let interface_name = CString::new(iface.0.as_str()).expect("Null values in interface name");
-        let os_interface_index = if_nametoindex(interface_name.as_c_str())?;
-
-        let mut ila = InterfaceListenAddresses{
-            interface_name: iface.0.clone(),
-            interface_index: iface_index * 1000,
-            interface_id: os_interface_index,
-            
-            ipv4_enabled: if let Some(only_interfaces) = &maybe_only_interfaces && only_interfaces.contains_key(iface.0.as_str()) {
-                    only_interfaces.get(iface.0.as_str()).unwrap().ipv4
-                } else {
-                    true
-                },
-            ipv4_multicast_interface_address_index: None,
-            ipv4_sockets: Vec::new(),
-
-            ipv6_enabled: if let Some(only_interfaces) = &maybe_only_interfaces && only_interfaces.contains_key(iface.0.as_str()) {
-                    only_interfaces.get(iface.0.as_str()).unwrap().ipv6
-                } else {
-                    true
-                },
-            ipv6_multicast_interface_address_index: None,
-            ipv6_sockets: Vec::new(),
-
-        };
-        
-        // Process the IPV4 addresses
-        if ila.ipv4_enabled {
-            if iface.1.get(&AddressFamily::Inet).unwrap().len() > 0 {
-                // IPv4 is enabled, however there still need to be a valid IPv4 address for it to really be enabled.
-                for (ifaddr_index, ifaddr) in iface.1.get(&AddressFamily::Inet).unwrap().iter().enumerate() {
-                    let ip_address = sockaddr_nix_to_stdnet(ifaddr.address, port).unwrap();
-                    let ip_netmask = sockaddr_nix_to_stdnet(ifaddr.netmask, port).unwrap();
-                    let ip_network = to_network(ip_address, ip_netmask)?;
-                    let is: InterfaceSocket<SocketAddrV4> = InterfaceSocket {
-                        interface_address_index: ila.interface_index + ifaddr_index,
-                        address: match ip_address { SocketAddr::V4(sin) => sin, _ => unreachable!() },
-                        netmask: match ip_netmask { SocketAddr::V4(sin) => sin, _ => unreachable!() },
-                        network: match ip_network { SocketAddr::V4(sin) => sin, _ => unreachable!() },
-                        socket: std::cell::RefCell::new(None)
-                    };
-
-                    ila.ipv4_sockets.push(is);
-                }
-
-                // Sort the IPv4 addresses to find a suitable address that supports multicast.
-                let mut filtered_addresses: Vec<&InterfaceAddress> = iface.1.get(&AddressFamily::Inet).unwrap().iter()
-                    .filter(|&e| e.flags.contains(InterfaceFlags::IFF_MULTICAST))
-                    .collect();
-                filtered_addresses.sort_by_key(|&e| {
-                    let sin = e.address.as_ref().unwrap().as_sockaddr_in().unwrap();
-                    let ip = sin.ip();
-                    1 * (if ip.is_link_local() {1000} else if ip.is_private() {2000} else if is_globalish4(&ip) {3000} else {5000})
-                });
-
-                if let Some(&filtered_addresses_first) = filtered_addresses.get(0) {
-                    // Find the address reference
-                    let ip_multicast = match sockaddr_nix_to_stdnet(filtered_addresses_first.address, 0).unwrap() { SocketAddr::V4(sin) => sin, _ => unreachable!() };
-                    ila.ipv4_multicast_interface_address_index = Some(ila.ipv4_sockets.iter().find(|&e| e.address.ip() == ip_multicast.ip()).unwrap().interface_address_index);
-                } else {
-                    log::info!("Interface {} IPv4 multicast disabled. No suitable addresses", ila.interface_name);
-                }
-            } else {
-                log::info!("Interface {} IPv4 disabled. No available IPv4 addresses", ila.interface_name);
-                ila.ipv4_enabled = false;
-            }
-        }
-
-        // Repeat for the IPv6 addresses. Note that we prefer a ULA over a global here because we are specifically looking
-        // for local traffic. We might choose to listen to all addresses, the the multicast bind address and primary
-        // should address should really be local.
-        if ila.ipv6_enabled {
-            if iface.1.get(&AddressFamily::Inet6).unwrap().len() > 0 {
-                // IPv4 is enabled, however there still need to be a valid IPv4 address for it to really be enabled.
-                for (ifaddr_index, ifaddr) in iface.1.get(&AddressFamily::Inet6).unwrap().iter().enumerate() {
-                    let ip_address = sockaddr_nix_to_stdnet(ifaddr.address, port).unwrap();
-                    let ip_netmask = sockaddr_nix_to_stdnet(ifaddr.netmask, port).unwrap();
-                    let ip_network = to_network(ip_address, ip_netmask)?;
-                    let is: InterfaceSocket<SocketAddrV6> = InterfaceSocket {
-                        interface_address_index: ila.interface_index + ifaddr_index,
-                        address: match ip_address { SocketAddr::V6(sin) => sin, _ => unreachable!() },
-                        netmask: match ip_netmask { SocketAddr::V6(sin) => sin, _ => unreachable!() },
-                        network: match ip_network { SocketAddr::V6(sin) => sin, _ => unreachable!() },
-                        socket: std::cell::RefCell::new(None)
-                    };
-
-                    ila.ipv6_sockets.push(is);
-                }
-
-                // Sort the IPv6 addresses to find a suitable address that supports multicast.
-                let mut filtered_addresses: Vec<&InterfaceAddress> = iface.1.get(&AddressFamily::Inet6).unwrap().iter()
-                    .filter(|&e| e.flags.contains(InterfaceFlags::IFF_MULTICAST))
-                    .collect();
-                filtered_addresses.sort_by_key(|&e| {
-                    let sin = e.address.as_ref().unwrap().as_sockaddr_in6().unwrap();
-                    let ip = sin.ip();
-                    1 * (if ip.is_unicast_link_local() {1000} else if ip.is_unique_local() {2000} else if is_globalish6(&ip) {3000} else {5000})
-                });
-
-                if let Some(&filtered_addresses_first) = filtered_addresses.get(0) {
-                    // Find the address reference
-                    let ip_multicast = match sockaddr_nix_to_stdnet(filtered_addresses_first.address, 0).unwrap() { SocketAddr::V6(sin) => sin, _ => unreachable!() };
-                    ila.ipv6_multicast_interface_address_index = Some(ila.ipv6_sockets.iter().find(|&e| e.address.ip() == ip_multicast.ip()).unwrap().interface_address_index);
-                } else {
-                    log::info!("Interface {} IPv6 multicast disabled. No suitable addresses", ila.interface_name);
-                }
-            } else {
-                log::info!("Interface {} IPv6 disabled. No available IPv4 addresses", ila.interface_name);
-                ila.ipv6_enabled = false;
-            }
-        }
-
-        // Save the interface info
-        ilas.push(ila);
+        // Find the IPv6 multicast address (if any)
+        let mut socket6_indexes: Vec<(usize, usize)> = ila.sockets.iter()
+            .enumerate()
+            .map(|(index, e)|
+                (
+                    index,
+                    index + if let IpAddr::V6(ip) = e.address.ip() && e.multicast_capable {
+                        1 * (if ip.is_unicast_link_local() {1000} else if ip.is_unique_local() {2000} else if is_globalish6(&ip) {3000} else {5000})
+                    } else {
+                        1_000_000
+                    }
+                )
+            )
+            .filter(|&(_, pref)| pref < 1_000_000)
+            .collect();
+        socket6_indexes.sort_by_key(|&(_, pref)| pref);
+        socket6_indexes.get(0).and_then(|&(index, _)| {
+            ila.sockets[index].multicast_selected = true;
+            Some(true)
+        });
     }
 
     // Display the networking configuration
-    for ila in ilas.iter() {
+    for ila in ilas_vec.iter() {
         log::debug!("Interface '{}'", ila.interface_name);
-        if ila.ipv4_enabled {
-            let addrs = ila.ipv4_sockets.iter().map(|e|
-                format!("{}:{}{}", e.address.ip().to_string(), e.address.port(), if Some(e.interface_address_index) == ila.ipv4_multicast_interface_address_index {"(M)"} else {""})
-            ).collect::<Vec<String>>().join(", ");
-            log::debug!("  IPv4 addresses: {}", addrs);
-        }
-        if ila.ipv6_enabled {
-            let addrs = ila.ipv6_sockets.iter().map(|e|
-                format!("{}:{}{}", e.address.ip().to_string(), e.address.port(), if Some(e.interface_address_index) == ila.ipv6_multicast_interface_address_index {"(M)"} else {""})
-            ).collect::<Vec<String>>().join(", ");
-            log::debug!("  IPv6 addresses: {}", addrs);
-        }
+
+        // Display the IPv4 addresses
+        let addrs = ila.sockets.iter()
+            .filter(|&e| matches!(e.address.ip(), IpAddr::V4(_)))
+            .map(|e|
+                format!("{}:{}{}", e.address.ip().to_string(), e.address.port(), if e.multicast_selected {"(M)"} else {""})
+            )
+            .collect::<Vec<String>>().join(", ");
+        log::debug!("  IPv4 addresses: {}", addrs);
+
+        // Display the IPv4 addresses
+        let addrs = ila.sockets.iter()
+            .filter(|&e| matches!(e.address.ip(), IpAddr::V6(_)))
+            .map(|e|
+                format!("{}:{}{}", e.address.ip().to_string(), e.address.port(), if e.multicast_selected {"(M)"} else {""})
+            )
+            .collect::<Vec<String>>().join(", ");
+        log::debug!("  IPv6 addresses: {}", addrs);
     }
 
-    Ok(ilas)
+    Ok(ilas_vec)
 }
 
 /// Open all of the network connections
 pub async fn open_sockets(ilas: &Vec<InterfaceListenAddresses>) -> Result<(), ConnectorError> {
     // Iterate through each and open the sockets
     for ila in ilas.iter() {
-        if ila.ipv4_enabled {
-            for is in ila.ipv4_sockets.iter() {
-                let join_multicast = ila.ipv4_multicast_interface_address_index == Some(is.interface_address_index);
-                log::info!("Opening {}:{} on interface {}{}", is.address.ip(), is.address.port(), ila.interface_name, if join_multicast {" with multicast"} else {""});
-                let socket = UdpSocket::bind(is.address).await?;
+        for is in ila.sockets.iter() {
+            log::info!("Opening {}:{}{} on interface '{}'", is.address.ip(), is.address.port(), if is.multicast_selected {" with multicast"} else {""}, ila.interface_name);
 
-                if join_multicast {
-                    socket.join_multicast_v4(MULTICAST_IPV4, is.address.ip().clone())?;
+            // Create the socket
+            let socket: UdpSocket = UdpSocket::bind(is.address).await?;
+
+            // Enable multicast
+            if is.multicast_selected {
+                if let IpAddr::V4(ip) = is.address.ip() {
+                    socket.join_multicast_v4(MULTICAST_IPV4, ip)?;
+                } else if matches!(is.address, SocketAddr::V6(_)) {
+                    socket.join_multicast_v6(&MULTICAST_IPV6, ila.interface_index)?;
                 }
-                *is.socket.borrow_mut() = Some(socket);
             }
-        }
 
-        if ila.ipv6_enabled {
-            for is in ila.ipv6_sockets.iter() {
-                let join_multicast = ila.ipv6_multicast_interface_address_index == Some(is.interface_address_index);
-                log::info!("Opening {}:{} on interface {}{}", is.address.ip(), is.address.port(), ila.interface_name, if join_multicast {" with multicast"} else {""});
-                let socket = UdpSocket::bind(is.address).await?;
-
-                if join_multicast {
-                    socket.join_multicast_v6(&MULTICAST_IPV6, ila.interface_id)?;
-                }
-                *is.socket.borrow_mut() = Some(socket);
-            }
+            // Save
+            *is.socket.borrow_mut() = Some(socket);
         }
     }
 
@@ -399,28 +359,24 @@ pub async fn open_sockets(ilas: &Vec<InterfaceListenAddresses>) -> Result<(), Co
 
 /// Close all sockets
 pub async fn close_sockets(ilas: &Vec<InterfaceListenAddresses>) -> Result<(), ConnectorError> {
-    log::info!("Closing all open sockets");
-
     // Iterate through each and open the sockets
     for ila in ilas.iter() {
-        for is in ila.ipv4_sockets.iter() {
-            {
-                let maybe_socket = is.socket.borrow();
-                if let Some(socket) = maybe_socket.as_ref() && Some(is.interface_address_index) == ila.ipv4_multicast_interface_address_index {
-                    log::debug!("leaving IPv4 multicast on interface '{}'", ila.interface_name);
-                    socket.leave_multicast_v4(MULTICAST_IPV4, is.address.ip().clone())?;
+        for is in ila.sockets.iter() {
+            log::info!("Closing {}:{}{} on interface '{}'", is.address.ip(), is.address.port(), if is.multicast_selected {" with multicast"} else {""}, ila.interface_name);
+
+            // Create the socket
+            let socket: UdpSocket = UdpSocket::bind(is.address).await?;
+
+            // Enable multicast
+            if is.multicast_selected {
+                if let IpAddr::V4(ip) = is.address.ip() {
+                    socket.leave_multicast_v4(MULTICAST_IPV4, ip)?;
+                } else if matches!(is.address, SocketAddr::V6(_)) {
+                    socket.leave_multicast_v6(&MULTICAST_IPV6, ila.interface_index)?;
                 }
             }
-            *is.socket.borrow_mut() = None;
-        }
-        for is in ila.ipv6_sockets.iter() {
-            {
-                let maybe_socket = is.socket.borrow();
-                if let Some(socket) = maybe_socket.as_ref() && Some(is.interface_address_index) == ila.ipv6_multicast_interface_address_index {
-                    log::debug!("leaving IPv6 multicast on interface '{}'", ila.interface_name);
-                    socket.leave_multicast_v6(&MULTICAST_IPV6, ila.interface_id)?;
-                }
-            }
+
+            // Save
             *is.socket.borrow_mut() = None;
         }
     }

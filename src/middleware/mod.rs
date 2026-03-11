@@ -1,14 +1,26 @@
 //! ECHONET Middleware implementation
 //! The middleware only deals with events.
+
+use chrono::Datelike;
+use std::fmt::Write;
+
 pub mod events;
 pub mod api;
 
-// Manufacturer codes
-const MANUFACTURER_UNREGISTERED: [u8; 3] = [0xff, 0xff, 0xff];
+#[cfg(test)]
+mod tests;
+
+/// Maximum size of an EPC data block
+/// Needs two bytes for the type and length
+const MAX_EPC_LEN: usize = 0xfd;
 
 // Node types
 const NODE_TYPE_GENERAL: u8 = 0x01;
 const NODE_TYPE_TRANSMIT_ONLY: u8 = 0x02;
+
+// What message types are supported
+const NODE_MESSAGE_FORMAT_SPECIFIED: u8 = 0x01;
+const NODE_MESSAGE_FORMAT_ARBITRARY: u8 = 0x02;
 
 // EPC properties
 const EPC_OPERATING_STATUS: u8 = 0x80;
@@ -73,10 +85,53 @@ const NODE_VALUE_OPERATION_SET_AVAILABLE: u8 = 0x10;
 const NODE_VALUE_OPERATION_SET_SUPPORTED: u8 = 0x20;
 const NODE_VALUE_OPERATION_SET_MANDATORY: u8 = 0x40;
 
+// helper structs
+/// Holder for the version information and message types
+struct NodeEchoNetLiteSupportedVersion {
+    major_version: u8,
+    minor_version: u8,
+    specified_message: bool,
+    arbiturary_message: bool,
+}
+
+/// Holder for the supported EPC property maps
+struct NodePropertyMap {
+    /// byte 0xn0 + 0x80 operations
+    operations: [u16; 8]
+}
+
+impl NodePropertyMap {
+    /*
+    fn setOperation(&mut self, operation: u8) -> Result<(), api::EpcError> {
+        if operation < 0x80 {
+            // FIXME: error handling
+            return Err(api::EpcError::InvalidValue(0x00));
+        }
+
+        self.operations[((operation - 0x80) >> 8) as usize] |= 0x0001 << (operation & 0x0f);
+        Ok(())
+    }
+
+    fn clearOperation(&mut self, operation: u8) -> Result<(), api::EpcError> {
+        if operation < 0x80 {
+            // FIXME: error handling
+            return Err(api::EpcError::InvalidValue(0x00));
+        }
+
+        self.operations[((operation - 0x80) >> 8) as usize] &= !(0x0001 << (operation & 0x0f));
+        Ok(())
+    }
+    */
+}
+
+
 /// Traits to represent the canonical data format. Vec<u8> is the generic form.
 trait NodePropertyCanonicalType {}
 impl NodePropertyCanonicalType for Vec<u8> {}
 impl NodePropertyCanonicalType for bool {}
+impl NodePropertyCanonicalType for chrono::NaiveDate {}
+impl NodePropertyCanonicalType for String {}
+impl NodePropertyCanonicalType for NodeEchoNetLiteSupportedVersion {}
 trait NodePropertyGenericType: std::any::Any {
     fn get_epc(&self) -> u8;
     fn as_any(&self) -> &dyn std::any::Any;
@@ -86,8 +141,12 @@ trait NodePropertyGenericType: std::any::Any {
 // The type aliases the to_canonical and from_canonical functions. This is because multiple traits are not allowed
 // on the definition, but it also works to keep consistency. Closing the closure is very difficult and requires
 // a bunch of hoops. As such, we'll just use a Reference Count (Rc) to store against the original.
+/// Converter function from canonical to internal
 type FromCanonicalType<T: NodePropertyCanonicalType> = fn(&NodeProperty<T>, &T) -> Result<Vec<u8>, api::EpcError>;
-type ToCanonicalType<T: NodePropertyCanonicalType> = fn(&NodeProperty<T>, &Vec<u8>) -> Result<T, api::EpcError>;
+/// Converter function from internal to canonical
+type ToCanonicalType<T: NodePropertyCanonicalType> = fn(&NodeProperty<T>, &[u8]) -> Result<T, api::EpcError>;
+/// Validator for internal values, i.e. when recieved from the wire.
+type ValidatorType<T: NodePropertyCanonicalType> = fn(&NodeProperty<T>, &[u8]) -> bool;
 
 /// Generic definition of a ECHONET property. This allows for dynamically generating all of the object classes.
 struct NodeProperty<T: NodePropertyCanonicalType>
@@ -116,7 +175,11 @@ struct NodeProperty<T: NodePropertyCanonicalType>
     /// Convert the canonical type to a ECHONET Lite format. Result is used for storing, so passes ownership
     from_canonical: FromCanonicalType<T>,
     /// Convert the type from an ECHONET Lite format canonical format. Result is a different representation.
-    to_canonical: ToCanonicalType<T>
+    /// Converters should perform their own validation on inputs.
+    to_canonical: ToCanonicalType<T>,
+    /// Validate an internal value
+    validator: ValidatorType<T>
+    
 }
 
 /// The holder type
@@ -146,7 +209,8 @@ impl<T: NodePropertyCanonicalType> Clone for NodeProperty<T> {
             last_value: std::cell::RefCell::new(Vec::new()),
             last_updated: std::cell::Cell::new(0),
             from_canonical: self.from_canonical.clone(),
-            to_canonical: self.to_canonical.clone()
+            to_canonical: self.to_canonical.clone(),
+            validator: self.validator.clone()
         }
     }
 }
@@ -154,7 +218,10 @@ impl<T: NodePropertyCanonicalType> Clone for NodeProperty<T> {
 // General node property implementation
 impl<T: NodePropertyCanonicalType> NodeProperty<T> {
     /// Constructor
-    const fn new(name: &'static str, epc: u8, announce: bool, get_operation: NodePropertyOperation, set_operation: NodePropertyOperation, from_canonical: FromCanonicalType<T>, to_canonical: ToCanonicalType<T>) -> NodeProperty<T>
+    const fn new(name: &'static str, epc: u8, announce: bool,
+        get_operation: NodePropertyOperation, set_operation: NodePropertyOperation,
+        from_canonical: FromCanonicalType<T>, to_canonical: ToCanonicalType<T>,
+        validator: ValidatorType<T>) -> NodeProperty<T>
     {       
         Self {
             name: name,
@@ -180,16 +247,21 @@ impl<T: NodePropertyCanonicalType> NodeProperty<T> {
             last_updated: std::cell::Cell::new(0),
             from_canonical: from_canonical,
             to_canonical: to_canonical,
+            validator: validator,
         }
     }
 
     /// Clone an existing property and set the default value from a canonical value
     fn clone_with_canonical_value(&self, value: &T) -> Result<NodeProperty<T>, api::EpcError> {
-        let cloned = self.clone();
+        let internal = (self.from_canonical)(self, value)?;
+        self.clone_with_internal_value(&internal)
+    }
 
-        // Set the data using the from_canonical function
-        let mut cell_value = self.last_value.borrow_mut();
-        *cell_value = (self.from_canonical)(self, value)?;
+    /// Clone an existing property and set the default value from an internal value
+    /// Will create a copy of the vec.
+    fn clone_with_internal_value(&self, internal: &[u8]) -> Result<NodeProperty<T>, api::EpcError> {
+        let cloned = self.clone();
+        cloned.set_internal(internal)?;
         Ok(cloned)
     }
 
@@ -221,27 +293,16 @@ impl<T: NodePropertyCanonicalType> NodeProperty<T> {
     /// Getter function. Takes the raw EPC buffer and validates/returns it. It will
     /// check the size before actually setting. This set assumes data going to the ECHONET Lite node
     fn get(&self) -> Result<Vec<u8>, api::EpcError> {
-        // Check the value exists
-        if self.last_updated.get() == 0 {
-            return Err(api::EpcError::NoValue(self.epc));
-        }
-
-        // Get the current value. Convert to canonical to validate before sending.
-        let cell_value = &*self.last_value.borrow();
-        (self.to_canonical)(self, cell_value)?;
-
-        if cell_value.len() > 0xff {
-            return Err(api::EpcError::ValueTooLarge(self.epc));
-        }
+        let internal = self.get_internal()?;
 
         // Package into a wire value
-        let mut wire: Vec<u8> = Vec::with_capacity(cell_value.len() + 2);
-        wire[0] = self.epc;
-        wire[1] = wire.len() as u8;
-        let epc_data = &mut wire[2..][..cell_value.len()];
-        wire.copy_from_slice(cell_value);
+        let mut epc_buf: Vec<u8> = Vec::with_capacity(internal.len() + 2);
+        epc_buf[0] = self.epc;
+        epc_buf[1] = epc_buf.len() as u8;
+        let epc_buf_data = &mut epc_buf[2..][..internal.len()];
+        epc_buf_data.copy_from_slice(internal.as_slice());
 
-        Ok(wire)
+        Ok(epc_buf)
     }
 
     /// Setter. Note that permissions are not checked here because they are not equal. I.e. the Home Assistant site should have permissions applied
@@ -267,18 +328,8 @@ impl<T: NodePropertyCanonicalType> NodeProperty<T> {
 
         if data_size == 0 {
             unimplemented!("Zero length EPC data")
-        } else {
-            // Try and convert to the canonical form, which will invoke the validators.
-            let epc_data = epc_buf[2..].to_vec();
-            (self.to_canonical)(self, &epc_data)?;
-
-            // All good, now set the value
-            let mut cell_value = self.last_value.borrow_mut();
-            *cell_value = epc_data;
-            self.last_updated.set(chrono::Utc::now().timestamp_millis());
         }
-
-        Ok(())
+        self.set_internal(&epc_buf[2..])
     }
 
     /// Get and return an owned canonical version of the internal struct
@@ -288,34 +339,127 @@ impl<T: NodePropertyCanonicalType> NodeProperty<T> {
             return Err(api::EpcError::NoValue(self.epc));
         }
 
-        let cell_value = &*self.last_value.borrow();
-        (self.to_canonical)(self, cell_value)
+        // Validate the internal just in case someone has set manually
+        let cell_value: std::cell::Ref<'_, Vec<u8>> = self.last_value.borrow();
+        let internal = cell_value.as_slice();
+        if (self.validator)(self, internal) {
+            (self.to_canonical)(self, internal)
+        } else {
+            Err(api::EpcError::ValidationFailed(self.epc))
+        }
     }
 
     /// Set the internal state from a canonical version of the data
     fn set_canonical(&self, canonical: &T) -> Result<(), api::EpcError> {
-        let epc_data = (self.from_canonical)(self, canonical)?;
-        if epc_data.len() > 0xff {
-            return Err(api::EpcError::ValueTooLarge(self.epc));
+        // Duplicated internals to avoid a copy
+        let internal = (self.from_canonical)(self, canonical)?;
+        if internal.len() > MAX_EPC_LEN {
+            return Err(api::EpcError::ValueTooLarge(self.epc)); 
         }
 
-        let mut cell_value = self.last_value.borrow_mut();
-        *cell_value = epc_data;
-        self.last_updated.set(chrono::Utc::now().timestamp_millis());
-        Ok(())
+        // Validate and save. We can validate the original to avoid closing before valid.
+        if (self.validator)(self, internal.as_slice()) {
+            let mut cell_value = self.last_value.borrow_mut();
+            *cell_value = internal;
+            self.last_updated.set(chrono::Utc::now().timestamp_millis());
+            Ok(())
+        } else {
+            Err(api::EpcError::ValidationFailed(self.epc))
+        }
     }
 
-    /// Return a borrowed reference to the underlying vec. No checks on the data are
-    /// performed. The caller is expected to know the type and size.
+    /// Return a borrowed reference to the underlying vec. Cannot return a slice becuase
+    /// of lifetime issues.
     fn get_internal(&self) -> Result<std::cell::Ref<'_, Vec<u8>>, api::EpcError> {
         if self.last_updated.get() == 0 {
             return Err(api::EpcError::NoValue(self.epc));
         }
         Ok(self.last_value.borrow())
     }
+
+    /// Set a value. The value is cloned.
+    fn set_internal(&self, internal: &[u8]) -> Result<(), api::EpcError> {
+        if internal.len() > MAX_EPC_LEN {
+            return Err(api::EpcError::ValueTooLarge(self.epc)); 
+        }
+        // Validate and save. We can validate the original to avoid closing before valid.
+        if (self.validator)(self, internal) || internal.len() > MAX_EPC_LEN {
+            let mut cell_value = self.last_value.borrow_mut();
+            *cell_value = internal.to_vec();
+            self.last_updated.set(chrono::Utc::now().timestamp_millis());
+            Ok(())
+        } else {
+            Err(api::EpcError::ValidationFailed(self.epc))
+        }
+    }
 }
 
-/// From a Vec<u8> canonical type.
+// Converters. Some of these allow a validator, which validates the input, i.e. from_xxx -> canonical; to_xxx -> internal.
+// These are not meant to replace the validator item in the [NodeProperty] struct, which does full validation of the internal
+// value before setting. This is not efficient, but it is tolerant.
+/// Convert from a hext strin g(not padded)
+/// * `len`: the length of the byte buffer.
+#[inline(always)]
+fn from_hex(np: &NodeProperty<String>, canonical: &str, len: usize, validate: fn(&str) -> bool) -> Result<Vec<u8>, api::EpcError> {
+    // Validate that the input is a hex string
+    let mut start: usize = 0;
+    for c in canonical.chars() {
+        if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+            return Err(api::EpcError::InvalidValue(np.epc)); 
+        }
+        if c == '0' {
+            start += 1;
+        }
+    }
+
+    // Allocate
+    let non_padded_canonical = &canonical[start..];
+    if non_padded_canonical.len() > (len * 2) || !validate(canonical) {
+        return Err(api::EpcError::InvalidValue(np.epc));
+    }
+    let mut internal = vec![0; len];
+
+    if internal.len() > 0 {
+        // Assume not padded, so fill from the right.
+        // Offset of 1 if the length is even.
+        let offset: usize = if (non_padded_canonical.len() & 0x01) == 0x00 {1} else {0};
+
+        for i in (0..=non_padded_canonical.len()).rev().step_by(2) {
+            if 0 == i {
+                break; // Need to do this to catch odd size strings
+            }
+
+            let pos = (i as isize / 2) - (offset as isize);
+            let start = std::cmp::max((i as isize)-2, 0) as usize;
+            internal[pos as usize] = u8::from_str_radix(&non_padded_canonical[start..i], 16)?;
+        }
+    }
+    Ok(internal)
+}
+/// To a hex string cononical type.
+/// * `len`: the length of the byte buffer, which can be larger than the internal size.
+#[inline(always)]
+fn to_hex(np: &NodeProperty<String>, internal: &[u8], len: usize, validate: fn(&[u8]) -> bool) -> Result<String, api::EpcError> {
+    if internal.len() > len || !validate(internal) {
+        return Err(api::EpcError::InvalidValue(np.epc));
+    }
+
+    let mut canonical = String::with_capacity(len * 2);
+
+    let pad_len = len - internal.len();
+    let pad_str = "00";
+    for i in 0..len {
+        if i < pad_len {
+            canonical.push_str(pad_str);
+        } else {
+            let byte = &internal[i-pad_len];
+            write!(&mut canonical, "{:02x}", byte).expect("Unable to write");
+        }
+    }
+    Ok(canonical)
+}
+
+/// From a Vec<u8> canonical type. These are for actual values that should be binary. For hex strings, use from_hex.
 #[inline(always)]
 fn from_vec(np: &NodeProperty<Vec<u8>>, canonical: &Vec<u8>, validate: fn(&Vec<u8>) -> bool) -> Result<Vec<u8>, api::EpcError> {
     if !validate(canonical) {
@@ -323,13 +467,43 @@ fn from_vec(np: &NodeProperty<Vec<u8>>, canonical: &Vec<u8>, validate: fn(&Vec<u
     }
     Ok(canonical.clone())
 }
-/// To a bool<u8> canonical type
+/// To a Vec<u8> cononical type. These are for actual values that should be binary. For hex strings, use to_hex.
 #[inline(always)]
-fn to_vec(np: &NodeProperty<Vec<u8>>, internal: &Vec<u8>, validate: fn(&Vec<u8>) -> bool) -> Result<Vec<u8>, api::EpcError> {
+fn to_vec(np: &NodeProperty<Vec<u8>>, internal: &Vec<u8>, validate: fn(&[u8]) -> bool) -> Result<Vec<u8>, api::EpcError> {
     if !validate(internal) {
         return Err(api::EpcError::InvalidValue(np.epc));
     }
     Ok(internal.clone())
+}
+
+/// From a date without timezone canonical type.
+#[inline(always)]
+fn from_date(np: &NodeProperty<chrono::NaiveDate>, canonical: &chrono::NaiveDate, validate: fn(&chrono::NaiveDate) -> bool) -> Result<Vec<u8>, api::EpcError> {
+    if !validate(canonical) {
+        return Err(api::EpcError::InvalidValue(np.epc));
+    }
+    let mut buf = vec![0x00; 4];
+    (&mut buf[0..2]).copy_from_slice(&(canonical.year() as i16).to_be_bytes());
+    buf[2] = canonical.month() as u8;
+    buf[3] = canonical.day() as u8;
+    Ok(buf)
+}
+/// To a date without timezone cononical type.
+#[inline(always)]
+fn to_date(np: &NodeProperty<chrono::NaiveDate>, internal: &[u8], validate: fn(&[u8]) -> bool) -> Result<chrono::NaiveDate, api::EpcError> {
+    if internal.len() != 4 || !validate(internal) {
+        return Err(api::EpcError::InvalidValue(np.epc));
+    }
+    let year = u16::from_be_bytes(internal[0..2].try_into().unwrap()) as i32;
+    let month = internal[2] as u32;
+    let day = internal[3] as u32;
+
+    let maybe_canonical = chrono::NaiveDate::from_ymd_opt(year, month, day);
+    if let Some(canonical) = maybe_canonical {
+        Ok(canonical)
+    } else {
+        return Err(api::EpcError::InvalidValue(np.epc));
+    }    
 }
 
 /// From a bool canonical type
@@ -339,7 +513,7 @@ fn from_bool(_np: &NodeProperty<bool>, canonical: &bool, true_value: u8, false_v
 }
 /// To a bool canonical type
 #[inline(always)]
-fn to_bool(np: &NodeProperty<bool>, internal: &Vec<u8>, true_value: u8, false_value: u8) -> Result<bool, api::EpcError> {
+fn to_bool(np: &NodeProperty<bool>, internal: &[u8], true_value: u8, false_value: u8) -> Result<bool, api::EpcError> {
     if internal.len() == 1 {
         if internal[0] == true_value {
             Ok(true)
@@ -362,34 +536,51 @@ const NODE_PROPERTY_OPERATING_STATUS: NodeProperty<bool> = NodeProperty::new(
     NodePropertyOperation::Mandatory,
     NodePropertyOperation::Supported,
     |np, canonical| from_bool(np, canonical, EPC_OPERATION_STATUS_ON, EPC_OPERATION_STATUS_OFF),    
-    |np, internal| to_bool(np, internal, EPC_OPERATION_STATUS_ON, EPC_OPERATION_STATUS_OFF)
+    |np, internal| to_bool(np, internal, EPC_OPERATION_STATUS_ON, EPC_OPERATION_STATUS_OFF),
+    |_, internal| internal == [EPC_OPERATION_STATUS_ON] || internal == [EPC_OPERATION_STATUS_OFF]
 );
 /// This type is special. It contains the version supported AND the message type supported. However,
 /// in ECHONET Lite, only the "specified message format" is supported, meaning that the if the device
 /// advertisies "arbitrary message format", chances are we won't be able to interpret any messages from
 /// the device. The actual message format is stored in EHD1/EHD2 headers. For here, we will just store
 /// the value.
-const NODE_PROPERTY_VERSION_INFORMATION: NodeProperty<Vec<u8>> = NodeProperty::new(
+const NODE_PROPERTY_VERSION_INFORMATION: NodeProperty<NodeEchoNetLiteSupportedVersion> = NodeProperty::new(
     "Version Information",
     EPC_VERSION_INFORMATION,
     false,
     NodePropertyOperation::Mandatory,
     NodePropertyOperation::NotSupported,
-    |np, canonical| from_vec(np, canonical, |buf| buf.len() == 4),
-    |np, internal| to_vec(np, internal, |buf| buf.len() == 4),
+    |_, canonical| {
+        let mut internal = Vec::with_capacity(4);
+        internal[0] = canonical.major_version;
+        internal[1] = canonical.minor_version;
+        internal[2] = if canonical.specified_message {NODE_MESSAGE_FORMAT_SPECIFIED} else {0x00} | if canonical.arbiturary_message {NODE_MESSAGE_FORMAT_ARBITRARY} else {0x00};
+        internal[3] = 0x00;
+        Ok(internal)
+    },
+    |_, internal| {
+        Ok(NodeEchoNetLiteSupportedVersion {
+            major_version: internal[0],
+            minor_version: internal[1],
+            specified_message: (internal[2] & NODE_MESSAGE_FORMAT_SPECIFIED) == NODE_MESSAGE_FORMAT_SPECIFIED,
+            arbiturary_message: (internal[2] & NODE_MESSAGE_FORMAT_ARBITRARY) == NODE_MESSAGE_FORMAT_ARBITRARY,
+        })
+    },
+    |_, internal| internal.len() == 4
 );
 /// This stores two values. The whole value can be considered the identification number, with the
 /// first byte identifying the communication medium. In ECHONET Lite, this is fixed at 0xfe. This also means
 /// that the rest of the data is the "manufacturer specified format". This is basically 3 bytes identifying
 /// the manufacturer and then the remaining 13 bytes specified by the manufacturer.
-const NODE_PROPERTY_IDENTIFICATION_NUMBER: NodeProperty<Vec<u8>> = NodeProperty::new(
+const NODE_PROPERTY_IDENTIFICATION_NUMBER: NodeProperty<String> = NodeProperty::new(
     "Version Information",
     EPC_IDENTIFICATION_NUMBER,
     false,
     NodePropertyOperation::Mandatory,
     NodePropertyOperation::NotSupported,
-    |np, canonical| from_vec(np, canonical, |buf| buf.len() == 17 && buf[0] == 0xfe),
-    |np, internal| to_vec(np, internal, |buf| buf.len() == 17 && buf[0] == 0xfe),
+    |np, canonical: &String| from_hex(np, canonical, 17, |_| true),
+    |np, internal| to_hex(np, internal, 17, |_| true),
+    |_, internal| internal.len() == 17 && internal[0] == 0xfe
 );
 /// The fault status. true == fault. False ==  no fault.
 const NODE_PROPERTY_FAULT_STATUS: NodeProperty<bool> = NodeProperty::new(
@@ -399,18 +590,66 @@ const NODE_PROPERTY_FAULT_STATUS: NodeProperty<bool> = NodeProperty::new(
     NodePropertyOperation::Supported,
     NodePropertyOperation::NotSupported,
     |np, canonical| from_bool(np, canonical, EPC_FAULT_ENCOUNTERED, EPC_FAULT_NOT_ENCOUNTERED),    
-    |np, internal| to_bool(np, internal, EPC_FAULT_ENCOUNTERED, EPC_FAULT_NOT_ENCOUNTERED)
+    |np, internal| to_bool(np, internal, EPC_FAULT_ENCOUNTERED, EPC_FAULT_NOT_ENCOUNTERED),
+    |_, internal| internal == [EPC_FAULT_ENCOUNTERED] || internal == [EPC_FAULT_NOT_ENCOUNTERED]
 );
 /// Manufacturer code. See also [NODE_PROPERTY_IDENTIFICATION_NUMBER]
-const NODE_PROPERTY_MANUFACTURER_CODE: NodeProperty<Vec<u8>> = NodeProperty::new(
+const NODE_PROPERTY_MANUFACTURER_CODE: NodeProperty<String> = NodeProperty::new(
     "Manufacturer code",
     EPC_MANUFACTURER_CODE,
     false,
     NodePropertyOperation::Mandatory,
     NodePropertyOperation::NotSupported,
-    |np, canonical| from_vec(np, canonical, |buf| buf.len() == 3),
-    |np, internal| to_vec(np, internal, |buf| buf.len() == 3),
+    |np, canonical: &String| from_hex(np, canonical, 3, |_| true),
+    |np, internal| to_hex(np, internal, 3, |_| true),
+    |_, internal| internal.len() == 3
 );
+/// Business facility code. Also known as "Place of business code"
+const NODE_PROPERTY_BUSINESS_FACILITY_CODE: NodeProperty<String> = NodeProperty::new(
+    "Business facility code (Place of business code)",
+    EPC_BUSINESS_FACILITY_CODE,
+    false,
+    NodePropertyOperation::Mandatory,
+    NodePropertyOperation::NotSupported,
+    |np, canonical: &String| from_hex(np, canonical, 3, |_| true),
+    |np, internal| to_hex(np, internal, 3, |_| true),
+    |_, internal| internal.len() == 3
+);
+/// Product code
+/// TODO: solve the string/binary form for this. Doesn't make sense to be having binary floating about.
+const NODE_PROPERTY_PRODUCT_CODE: NodeProperty<String> = NodeProperty::new(
+    "Product code",
+    EPC_PRODUCT_CODE,
+    false,
+    NodePropertyOperation::Mandatory,
+    NodePropertyOperation::NotSupported,
+    |np, canonical: &String| from_hex(np, canonical, 12, |_| true),
+    |np, internal| to_hex(np, internal, 12, |_| true),
+    |_, internal| internal.len() == 12
+);
+/// Production number. Also known as "Serial number".
+const NODE_PROPERTY_PRODUCTION_NUMBER: NodeProperty<String> = NodeProperty::new(
+    "Production number (Serial number)",
+    EPC_PRODUCTION_NUMBER,
+    false,
+    NodePropertyOperation::Mandatory,
+    NodePropertyOperation::NotSupported,
+    |np, canonical: &String| from_hex(np, canonical, 12, |_| true),
+    |np, internal| to_hex(np, internal, 12, |_| true),
+    |_, internal| internal.len() == 12
+);
+/// Production date. Also known as "Serial number".
+const NODE_PROPERTY_PRODUCTION_DATE: NodeProperty<chrono::NaiveDate> = NodeProperty::new(
+    "Production date (Date of manufacture)",
+    EPC_PRODUCTION_DATE,
+    false,
+    NodePropertyOperation::Mandatory,
+    NodePropertyOperation::NotSupported,
+    |np, canonical| from_date(np, canonical, |_| true),
+    |np, internal| to_date(np, internal, |_| true),
+    |_, internal| internal.len() == 8
+);
+
 
 /// ECHONET Object representation (both device and profile)
 struct NodeObject {
@@ -436,7 +675,7 @@ impl NodeObject {
         // All objects has a standard set of superclass objects
         // Communication Middleware Specifications: Profile Object Class Group Specifications
 
-        // Create the unique identification number for this node.
+        // Create the unique identification number for this node (structure is as per the spec)
         let instance_bytes = instance.to_be_bytes();
         let identification_number_size = 17;
         let mut identification_number = Vec::with_capacity(identification_number_size);
@@ -445,6 +684,7 @@ impl NodeObject {
         identification_number[1..4].copy_from_slice(manufacturer_code);
         identification_number[(identification_number_size - 1 - std::mem::size_of::<u64>())..(identification_number_size-1)].copy_from_slice(&instance_bytes);
 
+        // TODO: instead of having a canonical form of vec, should it be a string of hex, or in the HA adapter, do we convert from hex string to hex array?
         // Construct the node object
         NodeObject {
             eoj: api::EOJ::from_groupclass_instance(
@@ -454,12 +694,17 @@ impl NodeObject {
             properties: vec![
                 // Superclass specifications (6.10.1 Overview of Profile Object Super Class Specifications)
                 Box::new(NODE_PROPERTY_FAULT_STATUS.clone_with_canonical_value(&false).unwrap()),
-                Box::new(NODE_PROPERTY_MANUFACTURER_CODE.clone_with_canonical_value(&manufacturer_code.to_vec()).unwrap()),
+                Box::new(NODE_PROPERTY_MANUFACTURER_CODE.clone_with_internal_value(manufacturer_code).unwrap()),
 
                 // Node profile class (6.11.1 Node Profile Class: Detailed Specifications)
                 Box::new(NODE_PROPERTY_OPERATING_STATUS.clone_with_canonical_value(&true).unwrap()),
-                Box::new(NODE_PROPERTY_VERSION_INFORMATION.clone_with_canonical_value(&[api::ECHONET_MAJOR_VERSION, api::ECHONET_MINOR_VERSION, 0x01, 0x00].to_vec()).unwrap()),
-                Box::new(NODE_PROPERTY_IDENTIFICATION_NUMBER.clone_with_canonical_value(&identification_number).unwrap()),
+                Box::new(NODE_PROPERTY_VERSION_INFORMATION.clone_with_canonical_value(&NodeEchoNetLiteSupportedVersion {
+                    major_version: api::ECHONET_MAJOR_VERSION,
+                    minor_version: api::ECHONET_MINOR_VERSION,
+                    specified_message: true,
+                    arbiturary_message: false
+                }).unwrap()),
+                Box::new(NODE_PROPERTY_IDENTIFICATION_NUMBER.clone_with_internal_value(identification_number.as_slice()).unwrap()),
             ]
             // TODO: other properties
         }
@@ -536,6 +781,7 @@ impl Node {
 
     /// Determine if a node is available (looking at the profile object status. Needs to be online and without fault. Fault is optional.)
     fn is_available(&self) -> bool {
+        // TODO
         true
     }
 }
@@ -554,7 +800,7 @@ pub struct Middleware {
 impl Middleware {
     pub fn new(instance: u64, broadcast_tx: tokio::sync::mpsc::Sender<events::Event>) -> Self {
         // Get the manufacturer code from HA. Should allow a value to override?
-        let manufacturer_code = &MANUFACTURER_UNREGISTERED;
+        let manufacturer_code = &api::ECHONET_MANUFACTURER_CODE_UNREGISTERED;
 
         // Create the standard middleware instance, and default objects.
         let middleware = Self {
@@ -604,3 +850,20 @@ impl Middleware {
         Ok(())
     }
 }
+
+
+/* Needed?
+
+enum EPCType {
+    BYTE,
+    BYTEARRAY,
+    STRING,
+    DATE,
+    TIME,
+    DATETIME,
+    SIGNED_SHORT,
+    SIGNED_LONG,
+    UNSIGNED_SHORT,
+    UNSIGNED_LONG,
+}
+*/

@@ -1,4 +1,5 @@
-//! Main entrypoint for the EchoNet Lite to MQTT converter
+//! Main entrypoint for the EchoNet Lite to Home Assistant bridge
+#![feature(assert_matches)]
 extern crate macros;
 mod config;
 mod connectors;
@@ -11,6 +12,8 @@ use std::path::PathBuf;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::time::{self, Duration, Instant};
 use tokio::sync::mpsc;
+
+use connectors::Connectable;
 use middleware::Middleware;
 use middleware::events::Event;
 
@@ -83,8 +86,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     // then all interfaces, else only ones listed in the configuration. Start
     // by getting a list of interfaces. This is done here, before the network
     // startup so that we can detect configuration errors.
-    let interfaces = connectors::echonet::get_network_interfaces(&config.network).await?;
-    connectors::echonet::open_sockets(&interfaces).await?;
+    let network_sockets = connectors::echonet::Network::new();
+    network_sockets.initialise(&config).await?;
+    network_sockets.connect().await?;
 
     // Startup the Middleware. We only do this after all the channels have been
     // setup and any authentication performed.
@@ -123,9 +127,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                         break;
                     }
                     Event::Announce(_, _) => {
-                        // Broadcast announcement, send to all multicast sockets.
-                        log::info!("Performing: {}", event);
-                        connectors::echonet::to_wire(event).await;
+                        network_sockets.send(&event).await?;
                     }
                 }
             }
@@ -133,7 +135,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     }   
 
     // Close all the sockets
-    connectors::echonet::close_sockets(&interfaces).await?; 
+    network_sockets.disconnect().await?; 
     
     Ok(())
 }

@@ -5,9 +5,10 @@
 pub const ECHONET_MAJOR_VERSION: u8 = 1;
 /// ECHONET minor version
 pub const ECHONET_MINOR_VERSION: u8 = 14;
-/// ECHONET manufacturer code (should be assigned by the ECHONET consortium). We just take one that is likely not to clash.
+
+/// ECHONET manufacturer codes (should be assigned by the ECHONET consortium). We just take one that is likely not to clash.
 /// [https://echonet.jp/wp/wp-content/uploads/pdf/General/Echonet/ManufacturerCode/list_code.pdf](Defined codes).
-pub const ECHONET_MANUFACTURER_CODE: u32 = 0x0000FF00;
+pub const ECHONET_MANUFACTURER_CODE_UNREGISTERED: [u8; 3] = [0xff, 0xff, 0xff];
 
 // Object (EOJ) Group codes.
 // Middleware spec table 3.1
@@ -131,8 +132,10 @@ pub enum EpcError {
     NoValue(u8),
     /// The value is too large
     ValueTooLarge(u8),
+    /// Validation of the value failed.
+    ValidationFailed(u8),
     /// When using try_into
-    TypeConverstionError(std::array::TryFromSliceError)
+    TypeConverstionError(String),
 }
 
 impl std::fmt::Display for EpcError {
@@ -147,6 +150,7 @@ impl std::fmt::Display for EpcError {
             EpcError::OperationNotImplemented(epc) => write!(f, "EPC({:02x}): Operation not implemented by node", epc),
             EpcError::NoValue(epc) => write!(f, "EPC({:02x}): Value is not set", epc),
             EpcError::ValueTooLarge(epc) => write!(f, "EPC({:02x}): Value is larger than the container maximum", epc),
+            EpcError::ValidationFailed(epc) => write!(f, "EPC({:02x}): Validation for internal representation failed", epc),
             EpcError::TypeConverstionError(_) => write!(f, "EPC(??): Failed to convert internal type"),
         }
     }
@@ -156,7 +160,13 @@ impl std::error::Error for EpcError {}
 
 impl From<std::array::TryFromSliceError> for EpcError {
     fn from(value: std::array::TryFromSliceError) -> Self {
-        EpcError::TypeConverstionError(value)
+        EpcError::TypeConverstionError(value.to_string())
+    }
+}
+
+impl From<std::num::ParseIntError> for EpcError {
+    fn from(value: std::num::ParseIntError) -> Self {
+        EpcError::TypeConverstionError(value.to_string())
     }
 }
 

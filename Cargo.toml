@@ -30,6 +30,7 @@ serde = { version = "1.0.227", features = ["derive"] }
 serde_yaml = "0.9.34"
 stderrlog = "0.6.0"
 syn = "2.0.116"
+test-case = "3.3.1"
 tokio = { version = "1.47.1", features = ["full"] }
 
 [dependencies]
@@ -43,3 +44,6 @@ serde.workspace = true
 serde_yaml.workspace = true
 stderrlog.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+test-case.workspace = true

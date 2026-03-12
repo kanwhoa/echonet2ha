@@ -18,7 +18,7 @@ use middleware::Middleware;
 use middleware::events::Event;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "A bridge between Echonet Lite (via an adapter) to MQTT", long_about = None)]
+#[command(author, version, about = "A bridge between ECHONET Lite to Home Assistant", long_about = None)]
 struct Args {
     #[arg(short, long, default_value = "/mnt/config/e2m.yaml", help = "Configuration file")]
     config: PathBuf

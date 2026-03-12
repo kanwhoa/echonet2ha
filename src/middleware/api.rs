@@ -24,6 +24,21 @@ pub const EOJ_CLASS_GROUP_USER: u8 = 0x0f;
 
 const UNKNOWN: &str = "Unknown";
 
+pub trait WirePresentable: Sized {
+    fn to_wire(&self) -> Result<Vec<u8>, ConversionError>;
+    fn from_wire(wire: &[u8]) -> Result<Self, ConversionError>;
+}
+
+/// Node physical addresses
+#[derive(PartialEq, Eq, Debug)]
+pub enum NodePhysicalAddress {
+    Localhost,
+    IPv4(), // sock addr + interface, or ??
+    IPV6(),
+    Broadcast(), // Does not need an addr, it uses all.
+    Serial(String),
+}
+
 /// ECHONET Lite Object Specification (in-node addressing)
 /// A node can contain multiple objects which are addressable through the "ECHONET Lite Object Spefification" (EOJ)
 /// * Device Objects. These contain state and properties as per "APPENDIX Detailed Requirements for ECHONET Device objects"
@@ -37,7 +52,7 @@ pub struct EOJ {
 
 /// Implementation methods for EOJ
 impl EOJ {
-    pub fn from_groupclass_instance(group_class: &GroupClass, instance: u8) -> Self {
+    pub fn from_groupclass_instance(group_class: &NodeGroupClass, instance: u8) -> Self {
         Self {
             class_group_code: group_class.class_group_code,
             class_code: group_class.class_code,
@@ -52,20 +67,15 @@ impl std::fmt::Display for EOJ {
     }
 }
 
-/// Holder the group and class (first two bytees of the EOJ)
+/// Holder the group and class (first two bytes of the EOJ). This needs to be public as it contains
+/// a displayable form of the EOJ (whereas the EOJ is more replated to the wire form)
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GroupClass {
+pub struct NodeGroupClass {
     pub class_group_code: u8, // E.g. sensors, home equipment, etc
     pub class_code: u8, // The specific type, e.g. a presence sensor
 }
 
-// Constants for different group/classes
-/// Control class
-pub const CLASS_CONTROL_CONTROLLER: GroupClass = GroupClass {class_group_code: EOJ_CLASS_GROUP_CONTROL, class_code: 0xff};
-/// Profile class
-pub const CLASS_PROFILE_NODE_PROFILE: GroupClass = GroupClass {class_group_code: EOJ_CLASS_GROUP_PROFILE, class_code: 0xf0};
-
-impl GroupClass {
+impl NodeGroupClass {
     /// Genernate a displayable version of the group/class
     pub fn to_display(&self) -> (&'static str, &'static str) {
         let exact = match self {
@@ -95,14 +105,14 @@ impl GroupClass {
 
 }
 
-impl std::fmt::Display for GroupClass {
+impl std::fmt::Display for NodeGroupClass {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let (group_desc, class_desc) = self.to_display();
         write!(f, "Group '{}' Class '{}'", group_desc, class_desc)
     }
 }
 
-impl From<&EOJ> for GroupClass {
+impl From<&EOJ> for NodeGroupClass {
     fn from(value: &EOJ) -> Self {
         Self {
             class_group_code: value.class_group_code,
@@ -110,6 +120,11 @@ impl From<&EOJ> for GroupClass {
         }
     }
 }
+
+// Constants for different group/classes
+/// Control class
+pub const CLASS_CONTROL_CONTROLLER: NodeGroupClass = NodeGroupClass {class_group_code: EOJ_CLASS_GROUP_CONTROL, class_code: 0xff};
+pub const CLASS_PROFILE_NODE_PROFILE: NodeGroupClass = NodeGroupClass {class_group_code: EOJ_CLASS_GROUP_PROFILE, class_code: 0xf0};
 
 /// EPC errors
 #[derive(Debug)]
@@ -151,7 +166,7 @@ impl std::fmt::Display for EpcError {
             EpcError::NoValue(epc) => write!(f, "EPC({:02x}): Value is not set", epc),
             EpcError::ValueTooLarge(epc) => write!(f, "EPC({:02x}): Value is larger than the container maximum", epc),
             EpcError::ValidationFailed(epc) => write!(f, "EPC({:02x}): Validation for internal representation failed", epc),
-            EpcError::TypeConverstionError(_) => write!(f, "EPC(??): Failed to convert internal type"),
+            EpcError::TypeConverstionError(msg) => write!(f, "EPC(??): Failed to convert internal type: {}", msg),
         }
     }
 }
@@ -170,16 +185,25 @@ impl From<std::num::ParseIntError> for EpcError {
     }
 }
 
+impl From<ConversionError> for EpcError {
+    fn from(value: ConversionError) -> Self {
+        EpcError::TypeConverstionError(value.to_string())
+    }
+}
+
 #[derive(Debug)]
 pub enum MiddlewareError {
     /// A communications error on a channel or socket
     QueueFailure(String),
+    /// An invalid value was propvided
+    InvalidValue(String),
 }
 
 impl std::fmt::Display for MiddlewareError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             MiddlewareError::QueueFailure(msg) => write!(f, "Queue message failure: {}", msg),
+            MiddlewareError::InvalidValue(msg) => write!(f, "An invlid value was provided: {}", msg),
         }
     }
 }
@@ -189,6 +213,23 @@ impl std::error::Error for MiddlewareError {}
 impl<T> From<tokio::sync::mpsc::error::SendError<T>> for MiddlewareError {
     fn from(value: tokio::sync::mpsc::error::SendError<T>) -> Self {
         MiddlewareError::QueueFailure(format!("Failed to send '{}' message to queue as channel was closed", value.to_string()))
+    }
+}
+
+#[derive(Debug)]
+pub enum ConversionError {
+    /// Failed to serialise
+    SerialisationFailed(String),
+    /// Failed to deserialise
+    DeserialisationFailed(String),
+}
+
+impl std::fmt::Display for ConversionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ConversionError::SerialisationFailed(msg) => write!(f, "Failed to serialise object: {}", msg),
+            ConversionError::DeserialisationFailed(msg) => write!(f, "Failed to deserialise object: {}", msg),
+        }
     }
 }
 

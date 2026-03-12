@@ -29,8 +29,8 @@ impl std::fmt::Display for Event {
 
 /// Display helper for ECHONET Lite events
 fn display_message(f: &mut std::fmt::Formatter, src_ip: &str, seoj: &super::api::EOJ, dst_ip: &str, deoj: &super::api::EOJ) -> std::fmt::Result {
-    let seoj_display: super::api::GroupClass = seoj.into();
-    let deoj_display: super::api::GroupClass = deoj.into();
+    let seoj_display: super::api::NodeGroupClass = seoj.into();
+    let deoj_display: super::api::NodeGroupClass = deoj.into();
     write!(f, "Announce {}/{} ({}) -> {}/{} ({})", src_ip, seoj, seoj_display, dst_ip, deoj, deoj_display)
 }
 

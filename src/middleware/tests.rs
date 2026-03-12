@@ -1,67 +1,44 @@
 //! Middleware unit tests
+use crate::middleware::api::{ConversionError, WirePresentable};
+
 use super::*;
-use std::assert_matches;
+use std::{assert_eq, assert_matches};
 use test_case::test_case;
 
-/// Create a dummy Node Property for testing
-fn create_node_property<T: NodePropertyCanonicalType + Default>() -> NodeProperty<T> {
-    NodeProperty::new(
-        "test", 
-        0x00, 
-        false, 
-        NodePropertyOperation::Supported, 
-        NodePropertyOperation::Supported, 
-        |_, _| Ok(Vec::new()),
-        |_, _| Ok(T::default()),
-        |_, _| true
-    )
+#[test_case(&NodeEchonetLiteSupportedVersion{major_version: 1, minor_version: 14, specified_message: true, arbiturary_message: true}, &[0x01, 0x0e, 0x03, 0x00] ; "when 1.14 and both message types")]
+#[test_case(&NodeEchonetLiteSupportedVersion{major_version: 1, minor_version: 14, specified_message: true, arbiturary_message: false}, &[0x01, 0x0e, 0x01, 0x00] ; "when 1.14 and only structured messages")]
+#[test_case(&NodeEchonetLiteSupportedVersion{major_version: 1, minor_version: 14, specified_message: false, arbiturary_message: true}, &[0x01, 0x0e, 0x02, 0x00] ; "when 1.14 and only arbiturary messages")]
+fn node_echonet_lite_supported_version_to_wire_tests_success(input: &NodeEchonetLiteSupportedVersion, output: &[u8]) {
+    assert_matches!(input.to_wire(), Ok(v) if v == output.to_vec());
 }
 
-
-#[test_case("", 0, &[] ; "when empty string and zero size")]
-#[test_case("", 1, &[0x00] ; "when empty string and non zero size")]
-#[test_case("ff", 1, &[0xFF] ; "when single byte")]
-#[test_case("1234", 2, &[0x12, 0x34] ; "when two byte")]
-#[test_case("f", 1, &[0x0F] ; "when 0.5 byte")]
-#[test_case("234", 2, &[0x02, 0x34] ; "when 1.5 byte")]
-#[test_case("0034", 1, &[0x34]; "when single byte padded")]
-#[test_case("034", 1, &[0x34] ; "when 1.5 byte padded")]
-fn from_hex_tests_success(input: &str, buf_len: usize, output: &[u8]) {
-    let np = create_node_property::<String>();
-    assert_matches!(from_hex(&np, input, buf_len, |_| true), Ok(v) if v == output.to_vec());
+#[test_case(&NodeEchonetLiteSupportedVersion{major_version: 1, minor_version: 14, specified_message: false, arbiturary_message: false} ; "when 1.14 and no message types")]
+fn node_echonet_lite_supported_version_to_wire_tests_failure(input: &NodeEchonetLiteSupportedVersion) {
+    assert_matches!(input.to_wire(), Err(ConversionError::SerialisationFailed(_)));
 }
 
-//#[test_case("1234", 1 ; "when single byte overflow")]
-#[test_case("234", 1 ; "when 1.5 byte overflow")]
-fn from_hex_tests_failure(input: &str, buf_len: usize) {
-    let np = create_node_property::<String>();
-    assert_matches!(from_hex(&np, input, buf_len, |_| true), Err(api::EpcError::InvalidValue(_)));
+#[test_case(&[0x80], &[0x01, 0x80] ; "when 1")]
+#[test_case(&[0x80, 0x81, 0x8e, 0x8f, 0xf0, 0xf1, 0xfe, 0xff], &[0x08, 0x80, 0x81, 0x8e, 0x8f, 0xf0, 0xf1, 0xfe, 0xff] ; "when 8")]
+#[test_case(&[0x80, 0x8f, 0x92, 0x9d, 0xa4, 0xab, 0xb6, 0xb9, 0xc6, 0xc9, 0xd4, 0xdb, 0xe2, 0xed, 0xf0, 0xff], &[0x10, 0x81, 0x00, 0x42, 0x00, 0x24, 0x00, 0x18, 0x00, 0x00, 0x18, 0x00, 0x24, 0x00, 0x42, 0x00, 0x81] ; "when 16")]
+fn node_property_map_to_wire_tests_success(input: &[u8], output: &[u8]) {
+    let mut properties = NodePropertyMap::new();
+    for &operation in input {
+        assert_matches!(properties.enable_operation(operation), Ok(_));
+    }
+    assert_matches!(properties.to_wire(), Ok(v) if v == output.to_vec());
 }
 
-#[test_case(&[], 0, "" ; "when zero byte")]
-#[test_case(&[], 1, "00" ; "when one byte padded")]
-#[test_case(&[0x34], 1, "34" ; "when one byte")]
-#[test_case(&[0x34], 2, "0034" ; "when two byte padded")]
-#[test_case(&[0x12, 0x34], 2, "1234" ; "when two byte")]
-fn to_hex_tests_success(input: &[u8], buf_len: usize, output: &str) {
-    let np = create_node_property::<String>();
-    assert_matches!(to_hex(&np, input, buf_len, |_| true), Ok(v) if v == output);
+#[test_case(&[0x01, 0x80], &[0x80] ; "when 1")]
+#[test_case(&[0x08, 0x80, 0x81, 0x8e, 0x8f, 0xf0, 0xf1, 0xfe, 0xff], &[0x80, 0x81, 0x8e, 0x8f, 0xf0, 0xf1, 0xfe, 0xff] ; "when 8")]
+#[test_case(&[0x10, 0x81, 0x00, 0x42, 0x00, 0x24, 0x00, 0x18, 0x00, 0x00, 0x18, 0x00, 0x24, 0x00, 0x42, 0x00, 0x81], &[0x80, 0x8f, 0x92, 0x9d, 0xa4, 0xab, 0xb6, 0xb9, 0xc6, 0xc9, 0xd4, 0xdb, 0xe2, 0xed, 0xf0, 0xff] ; "when 16")]
+fn node_property_map_from_wire_tests_success(input: &[u8], output: &[u8]) {
+    let result_properties = NodePropertyMap::from_wire(input);
+    assert_matches!(result_properties, Ok(_));
+    let properties = result_properties.unwrap();
+    assert_eq!(properties.operations_count, input[0] as usize);
+
+    for &operation in output {
+        assert_matches!(properties.operation_enabled(operation), Ok(true), "operation '{:02x}' is not enabled", operation);
+    }
 }
 
-#[test_case(&[0x12, 0x34], 1 ; "when one byte overflow")]
-fn to_hex_tests_failure(input: &[u8], buf_len: usize) {
-    let np = create_node_property::<String>();
-    assert_matches!(to_hex(&np, input, buf_len, |_| true), Err(api::EpcError::InvalidValue(_)));
-}
-
-#[test_case(&chrono::NaiveDate::from_ymd_opt(1999, 12, 20).unwrap(), &[0x07, 0xcf, 0x0c, 0x14] ; "when ECHONET example")]
-fn from_date_tests_success(input: &chrono::NaiveDate, output: &[u8]) {
-    let np = create_node_property::<chrono::NaiveDate>();
-    assert_matches!(from_date(&np, input, |_| true), Ok(v) if v == output.to_vec());
-}
-
-#[test_case(&[0x07, 0xcf, 0x0c, 0x14], &chrono::NaiveDate::from_ymd_opt(1999, 12, 20).unwrap() ; "when ECHONET example")]
-fn to_date_tests_success(input: &[u8], output: &chrono::NaiveDate) {
-    let np = create_node_property::<chrono::NaiveDate>();
-    assert_matches!(to_date(&np, input, |_| true), Ok(v) if &v == output);
-}

@@ -15,7 +15,7 @@ const MULTICAST_IPV6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
 pub struct InterfaceSocket {
     /// The network address. Can be either V4 or V6. Need to keep the Sin structure to get the scope id.
     pub address: SocketAddr,
-    /// The network address. Can be either V4 or V6. Need to keep the Sin structure to get the scope id.s
+    /// The network address. Can be either V4 or V6. Need to keep the Sin structure to get the scope id.
     pub network: SocketAddr,
     /// The netmask. Store as an address to avoid constant re-expansion.
     pub netmask: SocketAddr,

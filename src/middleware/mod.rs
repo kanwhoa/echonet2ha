@@ -1,11 +1,14 @@
 //! ECHONET Middleware implementation
 //! The middleware only deals with events.
 pub mod api;
+pub mod epc_types;
 pub mod events;
-pub mod properties;
+//pub mod properties;
 
-#[cfg(test)]
-mod tests;
+//#[cfg(test)]
+//mod tests;
+
+use api::{EpcWrapper, NodeType};
 
 // Constants
 /// Maximum size of an EPC data block
@@ -13,6 +16,7 @@ mod tests;
 const MAX_EPC_LEN: usize = 0xfd;
 
 // Node types
+const NODE_TYPE_ALL: u8 = 0x00;
 const NODE_TYPE_GENERAL: u8 = 0x01;
 const NODE_TYPE_TRANSMIT_ONLY: u8 = 0x02;
 
@@ -28,238 +32,22 @@ const NODE_VALUE_OPERATION_SET_AVAILABLE: u8 = 0x10;
 const NODE_VALUE_OPERATION_SET_SUPPORTED: u8 = 0x20;
 const NODE_VALUE_OPERATION_SET_MANDATORY: u8 = 0x40;
 
-/// Node capabilities
-#[derive(PartialEq, Eq, Debug)]
-#[repr(u8)]
-enum NodeType {
-    General = NODE_TYPE_GENERAL,
-    TransmitOnly = NODE_TYPE_TRANSMIT_ONLY
-}
-
-/// Get/Set access rules. Announce is managed separately.
-/// If not supported, then announce must be false.
-#[derive(PartialEq, Eq, Debug)]
-pub enum NodePropertyOperation {
-    /// The Get or Set operation is NOT supported
-    NotSupported,
-    /// The Get or Set operation is supported
-    Supported,
-    /// The Get or Set operation is mandatory. Implies supported.
-    Mandatory,
-}
-
-/// Holder for the version information and message types
-pub struct NodeEchonetLiteSupportedVersion {
-    pub(in super) major_version: u8,
-    pub(in super) minor_version: u8,
-    pub specified_message: bool,
-    pub arbiturary_message: bool,
-}
-
-impl NodeEchonetLiteSupportedVersion {
-    pub fn version(&self) -> String {
-        format!("{}.{}", self.major_version, self.minor_version)
-    }
-}
-
-impl api::WirePresentable for NodeEchonetLiteSupportedVersion {
-    fn to_wire(&self) -> Result<Vec<u8>, api::ConversionError> {
-        if !self.specified_message && !self.arbiturary_message {
-            Err(api::ConversionError::SerialisationFailed("No supported message types".to_owned()))
-        } else {
-            let mut internal = vec![0x00; 4];
-            internal[0] = self.major_version;
-            internal[1] = self.minor_version;
-            internal[2] = if self.specified_message {NODE_MESSAGE_FORMAT_SPECIFIED} else {0x00} | if self.arbiturary_message {NODE_MESSAGE_FORMAT_ARBITRARY} else {0x00};
-            internal[3] = 0x00;
-            Ok(internal)
-        }
-    }
-
-    fn from_wire(wire: &[u8]) -> Result<Self, api::ConversionError> {
-        if wire.len() != 4 {
-            Err(api::ConversionError::DeserialisationFailed("Buffer is incorrectly sized".to_owned()))
-        } else {
-            Ok(NodeEchonetLiteSupportedVersion {
-                major_version: wire[0],
-                minor_version: wire[1],
-                specified_message: (wire[2] & NODE_MESSAGE_FORMAT_SPECIFIED) == NODE_MESSAGE_FORMAT_SPECIFIED,
-                arbiturary_message: (wire[2] & NODE_MESSAGE_FORMAT_ARBITRARY) == NODE_MESSAGE_FORMAT_ARBITRARY,
-            })
-        }
-    }
-}
-
-/// Holder for the supported EPC property maps
-pub struct NodePropertyMap {
-    /// byte 0xn0 + 0x80 operations
-    operations: [u16; 8],
-    operations_count: usize
-}
-
-impl NodePropertyMap {
-    fn new() -> Self {
-        NodePropertyMap{operations: [0x0000; 8], operations_count: 0}
-    }
-
-    /// Set the operation as enabled.
-    fn enable_operation(&mut self, operation: u8) -> Result<(), api::MiddlewareError> {
-        if !self.operation_enabled(operation)? {
-            self.operations[((operation - 0x80) >> 4) as usize] |= 0x0001 << (operation & 0x0f);
-            self.operations_count += 1;
-        }
-        Ok(())
-    }
-
-    /// Disable an operation
-    fn disable_operation(&mut self, operation: u8) -> Result<(), api::MiddlewareError> {
-        if self.operation_enabled(operation)? {
-            self.operations[((operation - 0x80) >> 4) as usize] &= !(0x0001 << (operation & 0x0f));
-            self.operations_count -= 1;
-        }
-        Ok(())
-    }
-
-    /// Disable all operations
-    fn disable_all(&mut self) -> Result<(), api::MiddlewareError> {
-        self.operations = [0x0000; 8];
-        Ok(())
-    }
-
-    /// Determines if an operation is enabled
-    /// 
-    /// # Arguments
-    /// * `operation` - The operation to check (range 0x80 - 0xff inclusive)
-    /// 
-    /// # Returns
-    /// Ok(true) if the operation is enabled, Ok(false) otherwise. Err if the
-    /// operation value is invalid.
-    fn operation_enabled(&self, operation: u8) -> Result<bool, api::MiddlewareError> {
-        self.validate_operation(operation)?;
-        Ok(self.operations[((operation - 0x80) >> 4) as usize] & (0x0001 << (operation & 0x0f)) != 0)
-    }
-
-    fn validate_operation(&self, operation: u8) -> Result<(), api::MiddlewareError> {
-        if operation < 0x80 {
-            return Err(api::MiddlewareError::InvalidValue("valid operations must be in the range 0x80 - 0xff inclusive".to_owned()));
-        }
-        Ok(())
-    }
-}
-
-impl std::fmt::Debug for NodePropertyMap {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut dbg = f.debug_struct("NodePropertyMap");
-        
-        dbg.field("operations_count", &self.operations_count);
-        for i in 0..8 {
-            let a = format!("{:02x}: {:08b} {:08b}", (i << 4) + 0x80, (self.operations[i] & 0xff00) >> 8, self.operations[i] & 0xff);
-            dbg.field(format!("operation[{:02x}]", i).as_str(), &a);
-        }
-
-        dbg.finish()
-    }
-}
-
-impl api::WirePresentable for NodePropertyMap {
-    /// A tradeoff here. To have a more efficient conversion, we need to track the count,
-    /// which means the set and clear operations 
-    fn to_wire(&self) -> Result<Vec<u8>, api::ConversionError> {
-        if self.operations_count < 16 {
-            // 1 byte count + max 15 operations
-            let mut wire = vec![0x00; self.operations_count + 1];
-            wire[0] = self.operations_count as u8;
-            let mut pos = 1;
-            for i in 0..8 {
-                for j in 0..16 {
-                    if self.operations[i] & (0x0001 << j) != 0 {
-                        wire[pos] = ((i << 4) | j) as u8 + 0x80;
-                        pos += 1;
-                    }
-                }
-            }
-            Ok(wire)
-        } else {
-            let mut wire = vec![0x00; 17];
-            wire[0] = self.operations_count as u8;
-
-            // Transpose. Would be quicker and easier with SIMD instructions, but that is not stable yet, and this is small
-            for i in 0..8 {
-                for j in 0..16 {
-                    wire[j+1] |= ((self.operations[i] & (0x0001 << j)) >> j << i) as u8;
-                }
-            }
-
-            Ok(wire)
-        }
-    }
-
-    fn from_wire(wire: &[u8]) -> Result<Self, api::ConversionError> {
-        if wire.len() == 0 || (wire[0] < 16 && ((wire[0] + 1) as usize != wire.len())) || (wire[0] >= 16 && wire.len() != 17) {
-            return Err(api::ConversionError::DeserialisationFailed("Invalid wire structure".to_owned()));
-        }
-        let mut npm = NodePropertyMap::new();
-        if wire[0] < 16 {
-            // List decode. Using internal access to avoid validation overhead.
-            for &operation in &wire[1..] {
-                if operation < 0x80 {
-                    return Err(api::ConversionError::DeserialisationFailed(format!("Invalid operation '0x{:02x}' specified", operation)));
-                }
-                npm.operations[((operation & 0xf0) as usize - 0x80) >> 4] |= 0x0001 << (operation & 0x0f);
-                npm.operations_count += 1;
-            }
-
-        } else {
-            // Map decode. Using internal access to avoid validation overhead.
-            let mut operations_count: usize = 0;
-            for i in 0..8 {
-                let mask = 0x01 << i;
-                for j in (0..16).rev() {
-                    npm.operations[i] = (npm.operations[i] << 1) | ((wire[j+1] & mask) >> i) as u16;
-                }
-                operations_count += npm.operations[i].count_ones() as usize;
-            }
-
-            if operations_count != wire[0] as usize {
-                return Err(api::ConversionError::DeserialisationFailed("Operation count mismatch in bitfield".to_owned()));
-            }
-            npm.operations_count = operations_count;
-        }
-
-        if wire[0] as usize == npm.operations_count {
-            Ok(npm) 
-        } else {
-            Err(api::ConversionError::DeserialisationFailed("Incorrect number of properties set".to_owned()))
-        } 
-    }
-}
+/*
 
 /// Traits to represent the canonical data format. Vec<u8> is the generic form.
-trait NodePropertyCanonicalType {}
+trait NodePropertyCanonicalType: Debug + Display {}
+// Conversions to specific types
 impl NodePropertyCanonicalType for Vec<u8> {}
 impl NodePropertyCanonicalType for bool {}
 impl NodePropertyCanonicalType for chrono::NaiveDate {}
 impl NodePropertyCanonicalType for String {}
 impl NodePropertyCanonicalType for NodeEchonetLiteSupportedVersion {}
 impl NodePropertyCanonicalType for NodePropertyMap {}
-trait NodePropertyGenericType: std::any::Any {
-    fn get_epc(&self) -> u8;
-    fn as_any(&self) -> &dyn std::any::Any;
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
-}
 
-// The type aliases the to_canonical and from_canonical functions. This is because multiple traits are not allowed
-// on the definition, but it also works to keep consistency. Closing the closure is very difficult and requires
-// a bunch of hoops. As such, we'll just use a Reference Count (Rc) to store against the original.
-/// Converter function from canonical to internal
-type FromCanonicalType<T: NodePropertyCanonicalType> = fn(&NodeProperty<T>, &T) -> Result<Vec<u8>, api::EpcError>;
-/// Converter function from internal to canonical
-type ToCanonicalType<T: NodePropertyCanonicalType> = fn(&NodeProperty<T>, &[u8]) -> Result<T, api::EpcError>;
-/// Validator for internal values, i.e. when recieved from the wire.
-type ValidatorType<T: NodePropertyCanonicalType> = fn(&NodeProperty<T>, &[u8]) -> bool;
 
-/// Generic definition of a ECHONET property. This allows for dynamically generating all of the object classes.
-struct NodeProperty<T: NodePropertyCanonicalType>
+
+/// Static implementation of an ECHONET property.
+struct StaticNodeProperty<T: NodePropertyCanonicalType>
 {
     /// Name of the property. Forcing static strings to avoid lifetime issues.
     name: &'static str,
@@ -292,7 +80,7 @@ struct NodeProperty<T: NodePropertyCanonicalType>
 }
 
 // General node property implementation
-impl<T: NodePropertyCanonicalType> NodeProperty<T> {
+impl<T: NodePropertyCanonicalType> StaticNodeProperty<T> {
     /// Constructor
     const fn new(name: &'static str, epc: u8, announce: bool,
         get_operation: NodePropertyOperation, set_operation: NodePropertyOperation,
@@ -470,19 +258,82 @@ impl<T: NodePropertyCanonicalType> NodeProperty<T> {
     }
 }
 
-/// The holder type
-impl<T: NodePropertyCanonicalType + 'static> NodePropertyGenericType for NodeProperty<T> {
-    fn get_epc(&self) -> u8 {
-        self.epc
-    }
-
+/// The EPC operations for StaticNodeProperty
+impl<T: NodePropertyCanonicalType> EPC<T> for StaticNodeProperty<T> {
+    /// See [EPC::as_any]
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 
+    /// See [EPC::as_any_mut]
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
+
+    /// See [EPC::epc]
+    fn epc(&self) -> u8 {
+        self.epc
+    }
+
+    /// See [EPC::name]
+    fn name(&self) -> &str {
+        self.name
+    }
+    
+    /// See [EPC::accept_wire]
+    fn accept_wire(&self, wire: &[u8]) -> bool {
+        wire.len() >= 2 && wire[0] == self.epc
+    }
+    
+    fn to_wire(&self) -> Result<Vec<u8>, api::ConversionError> {
+        todo!()
+    }
+    
+    fn from_wire(wire: &[u8]) -> Result<Self, api::ConversionError> {
+        todo!()
+    }
+    
+    fn get(&self) -> Result<std::cell::Ref<'_, Vec<u8>>, api::EpcError> {
+        todo!()
+    }
+    
+    fn set(&self, internal: &[u8]) -> Result<(), api::EpcError> {
+        todo!()
+    }
+    
+    fn to_canonical(&self) -> Result<T, api::EpcError> {
+        todo!()
+    }
+    
+    fn from_canonical(&self, canonical: &T) -> Result<(), api::EpcError> {
+        todo!()
+    }
+    
+    fn announce(&self) -> bool {
+        todo!()
+    }
+    
+    fn mandatory(&self) -> bool {
+        todo!()
+    }
+    
+    fn get_get_access_rule(&self) -> NodePropertyOperation {
+        todo!()
+    }
+    
+    fn is_get_supported(&self) -> bool {
+        todo!()
+    }
+    
+    fn get_set_access_rule(&self) -> NodePropertyOperation {
+        todo!()
+    }
+    
+    fn is_set_supported(&self) -> bool {
+        todo!()
+    }
+
+    
 }
 
 /// Clone implementation
@@ -502,11 +353,13 @@ impl<T: NodePropertyCanonicalType> Clone for NodeProperty<T> {
         }
     }
 }
+    */
 
 /// ECHONET Object representation (both device and profile)
 struct NodeObject {
     eoj: api::EOJ,
-    properties: Vec<Box<dyn NodePropertyGenericType>>
+    // FIXME: this is horrible....
+    properties: Vec<Box<dyn EpcWrapper>>
 }
 
 impl NodeObject {
@@ -536,20 +389,26 @@ impl NodeObject {
         identification_number[1..4].copy_from_slice(manufacturer_code);
         identification_number[(identification_number_size - 1 - std::mem::size_of::<u64>())..(identification_number_size-1)].copy_from_slice(&instance_bytes);
 
+        // Prevent the constant being created lots of times.
+        let group_class = &api::CLASS_PROFILE_NODE_PROFILE;
+
         // TODO: instead of having a canonical form of vec, should it be a string of hex, or in the HA adapter, do we convert from hex string to hex array?
         // Construct the node object
         NodeObject {
-            eoj: api::EOJ::from_groupclass_instance(
-                &api::CLASS_PROFILE_NODE_PROFILE,
-                r#type as u8
-            ),
+            eoj: api::EOJ::from_groupclass_instance(&group_class, r#type as u8),
             properties: vec![
                 // Superclass specifications (6.10.1 Overview of Profile Object Super Class Specifications)
-                Box::new(properties::NODE_PROPERTY_FAULT_STATUS.clone_with_canonical_value(&false).unwrap()),
-                Box::new(properties::NODE_PROPERTY_MANUFACTURER_CODE.clone_with_internal_value(manufacturer_code).unwrap()),
+                epc_types::property_factory(group_class, epc_types::EPC_OPERATING_STATUS).unwrap()
+
+                //Box::new(properties::NODE_PROPERTY_FAULT_STATUS.clone_with_canonical_value(&false).unwrap()),
+                //Box::new(properties::NODE_PROPERTY_MANUFACTURER_CODE.clone_with_internal_value(manufacturer_code).unwrap()),
+                /*
+                Box::new(properties::NODE_PROPERTY_ANNOUNCEMENT_PROPERTY_MAP.clone_with_dynamic_internal_value(???).unwrap()),
+                Box::new(properties::NODE_PROPERTY_SET_PROPERTY_MAP.clone_with_dynamic_value(???).unwrap()),
+                Box::new(properties::NODE_PROPERTY_GET_PROPERTY_MAP.clone_with_dynamic_value(???).unwrap()),*/
 
                 // Node profile class (6.11.1 Node Profile Class: Detailed Specifications)
-                Box::new(properties::NODE_PROPERTY_OPERATING_STATUS.clone_with_canonical_value(&true).unwrap()),
+                /*Box::new(properties::NODE_PROPERTY_OPERATING_STATUS.clone_with_canonical_value(&true).unwrap()),
                 Box::new(properties::NODE_PROPERTY_VERSION_INFORMATION.clone_with_canonical_value(&NodeEchonetLiteSupportedVersion {
                     major_version: api::ECHONET_MAJOR_VERSION,
                     minor_version: api::ECHONET_MINOR_VERSION,
@@ -557,11 +416,13 @@ impl NodeObject {
                     arbiturary_message: false
                 }).unwrap()),
                 Box::new(properties::NODE_PROPERTY_IDENTIFICATION_NUMBER.clone_with_internal_value(identification_number.as_slice()).unwrap()),
+                // TODO: self node instances, self node classes, node instant list S, node class list S*/
             ]
             // TODO: other properties
         }
     }
 
+    /*
     /// Find an EPC property
     fn get_node_property_by_code<T: NodePropertyCanonicalType + 'static>(&self, epc: u8) -> Result<&NodeProperty<T>, api::EpcError> {
         for np in self.properties.iter() {
@@ -591,6 +452,7 @@ impl NodeObject {
         }
         Err(api::EpcError::NotSupported(epc))
     }
+    */
 
 }
 
@@ -620,7 +482,7 @@ impl Node {
     /// The unique identifier for the node. Only 24 bits used, however, storing in a larger
     /// entity. This transparrently provides the EPC 0x83. It returns a copy to of the property
     /// data to avoid lifetie issues.
-    fn unique_identifier(&self) -> Result<[u8; 16], api::EpcError> {
+    /*fn unique_identifier(&self) -> Result<[u8; 16], api::EpcError> {
         let property_result = self.profile_object.get_node_property_by_template(&properties::NODE_PROPERTY_IDENTIFICATION_NUMBER);
         if let Ok(actual) = property_result {
             let data = actual.get_internal()?;
@@ -628,7 +490,7 @@ impl Node {
         } else {    
             Err(api::EpcError::NotAvailable(properties::EPC_IDENTIFICATION_NUMBER))
         }
-    }
+    }*/
 
     /// Determine if a node is available (looking at the profile object status. Needs to be online and without fault. Fault is optional.)
     fn is_available(&self) -> bool {

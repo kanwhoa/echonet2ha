@@ -1,5 +1,5 @@
 //! Middleware unit tests
-use crate::middleware::api::{ConversionError, WirePresentable};
+use crate::middleware::api::{ConversionError, Serialisable};
 
 use super::*;
 use std::{assert_eq, assert_matches};

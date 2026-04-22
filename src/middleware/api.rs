@@ -2,6 +2,7 @@
 //! Values that are used across wire and middleware implementations.
 use std::any::Any;
 use std::fmt::{Debug, Display, Write};
+use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 use std::str::{FromStr};
 use derive_more::{Display, From};
@@ -57,8 +58,8 @@ pub enum EpcError {
     OperationNotImplemented(u8),
     /// The value has not been set yet
     NoValue(u8),
-    /// The value is too large
-    ValueTooLarge(u8),
+    /// The value is too large (overflow)
+    ValueTooLarge(u8, String),
     /// Validation of the value failed.
     ValidationFailed(u8),
     /// Error when converting the value between types
@@ -78,7 +79,7 @@ impl std::fmt::Display for EpcError {
             EpcError::OperationNotAllowed(epc) => write!(f, "EPC({:02x}): Operation not allowed by access rule", epc),
             EpcError::OperationNotImplemented(epc) => write!(f, "EPC({:02x}): Operation not implemented by node", epc),
             EpcError::NoValue(epc) => write!(f, "EPC({:02x}): Value is not set", epc),
-            EpcError::ValueTooLarge(epc) => write!(f, "EPC({:02x}): Value is larger than the container maximum", epc),
+            EpcError::ValueTooLarge(epc, msg) => write!(f, "EPC({:02x}): Value is larger than the container maximum: {}", epc, msg),
             EpcError::ValidationFailed(epc) => write!(f, "EPC({:02x}): Validation for internal representation failed", epc),
             EpcError::TypeConverstionError(epc, msg) => write!(f, "EPC({:02x}): Failed to convert internal type: {}", epc, msg),
             EpcError::ValueError(epc, msg) => write!(f, "EPC({:02x}): Failed to obtain value: {}", epc, msg),
@@ -157,12 +158,137 @@ pub enum EpcAccessRule {
 }
 
 /// Details of the a fault
-#[derive(PartialEq, Eq, Debug)]
-pub enum NodeObjectFaultDetails {
-    Recoverable(String, u8),
-    RepairRequired(String, u8),
-    Indeterminate(u16),
-    EchonetMiddleware(u16)
+#[derive(PartialEq, Debug, Display)]
+#[repr(u16)]
+pub enum NodeObjectFaultDescription {
+    #[display("No error")]
+    None = 0x0000,
+
+    #[display("Recoverable (action: power cycle)")]
+    RecoverableByPowerCycle = 0x0001,
+    #[display("Recoverable (action: push reset)")]
+    RecoverableByReset = 0x0002,
+    #[display("Recoverable (action: physical adjustment)")]
+    RecoverableByPhysicalAdjustment = 0x0003,
+    #[display("Recoverable (action: add resources)")]
+    RecoverableByAdditionalResources = 0x0004,
+    #[display("Recoverable (action: cleaning required)")]
+    RecoverableByCleaning = 0x0005,
+    #[display("Recoverable (action: battery replacement)")]
+    RecoverableBatteryReplacement = 0x0006,
+    #[display("Recoverable (action: user defined, code: 0x{:04x})", _0)]
+    RecoverableUserDefined(u8) = 0x0009,
+
+    #[display("Repair (cause: safety tripped, index: 0x{:02x})", _0)]
+    RepairSafetyDevice(u8) = 0x000a,
+    #[display("Repair (cause: switch fault, index: 0x{:02x})", _0)]
+    RepairSwitch(u8) = 0x0014,
+    #[display("Repair (cause: sensor fault, index: 0x{:02x})", _0)]
+    RepairSensor(u8) = 0x001e,
+    #[display("Repair (cause: component fault, index: 0x{:02x})", _0)]
+    RepairComponent(u8) = 0x003c,
+    #[display("Repair (cause: control board, index: 0x{:02x})", _0)]
+    RepairControlBoard(u8) = 0x005a,
+    #[display("Repair (cause: user defined, code: 0x{:04x})", _0)]
+    RepairUserDefined(u16) = 0x006f,
+
+    #[display("Middleware failure (code: 0x{:04x})", _0)]
+    EchonetMiddleware(u16) = 0x03e9,
+
+    Indeterminate = 0x03ff
+}
+
+/// Simple conversion functions. The representation for this type is horrible.
+impl NodeObjectFaultDescription {
+    /// Create from a u16 value
+    pub fn try_from_u16(value: u16) -> Result<Self, &'static str> {
+        let low_byte = (0x00ff & value) as u8;
+        let high_byte = ((0xff & value) >> 8) as u8;
+        if (high_byte == 0x00 || high_byte >= 0x04) && low_byte < 0x6f {
+            match low_byte {
+                0x01 => Ok(NodeObjectFaultDescription::RecoverableByPowerCycle),
+                0x02 => Ok(NodeObjectFaultDescription::RecoverableByReset),
+                0x03 => Ok(NodeObjectFaultDescription::RecoverableByPhysicalAdjustment),
+                0x04 => Ok(NodeObjectFaultDescription::RecoverableByAdditionalResources),
+                0x05 => Ok(NodeObjectFaultDescription::RecoverableByCleaning),
+                0x06 => Ok(NodeObjectFaultDescription::RecoverableBatteryReplacement),
+                0x09 => Ok(NodeObjectFaultDescription::RecoverableUserDefined(high_byte)),
+                x if x >= 0x0a && x <= 0x13 => Ok(NodeObjectFaultDescription::RepairSafetyDevice(low_byte - 0x0a)),
+                x if x >= 0x14 && x <= 0x1d => Ok(NodeObjectFaultDescription::RepairSwitch(low_byte - 0x14)),
+                x if x >= 0x1e && x <= 0x3b => Ok(NodeObjectFaultDescription::RepairSensor(low_byte - 0x1e)),
+                x if x >= 0x3c && x <= 0x59 => Ok(NodeObjectFaultDescription::RepairComponent(low_byte - 0x3c)),
+                x if x >= 0x5a && x <= 0x6e => Ok(NodeObjectFaultDescription::RepairControlBoard(low_byte - 0x5a)),
+                _ => Err("Invalid value")
+            }
+        } else if value == 0x0000 {
+            Ok(NodeObjectFaultDescription::None)
+        } else if value >= 0x006f && value <= 0x03e8 {
+            Ok(NodeObjectFaultDescription::RepairUserDefined(value))
+        } else if value >= 0x03e9 && value <= 0x03ec {
+            Ok(NodeObjectFaultDescription::EchonetMiddleware(value))
+        } else if value == 0x03ff {
+            Ok(NodeObjectFaultDescription::Indeterminate)
+        } else {
+            Err("Invalid value")
+        }
+    }
+
+    /// Convert the struct to a u16
+    pub fn to_u16(&self) -> u16 {
+        match self {
+            NodeObjectFaultDescription::None => 0x0000,
+            NodeObjectFaultDescription::RecoverableByPowerCycle => 0x0001,
+            NodeObjectFaultDescription::RecoverableByReset => 0x0002,
+            NodeObjectFaultDescription::RecoverableByPhysicalAdjustment => 0x0003,
+            NodeObjectFaultDescription::RecoverableByAdditionalResources => 0x0004,
+            NodeObjectFaultDescription::RecoverableByCleaning => 0x0005,
+            NodeObjectFaultDescription::RecoverableBatteryReplacement => 0x0006,
+            NodeObjectFaultDescription::RecoverableUserDefined(high_byte) => (((*high_byte) as u16) << 8) | 0x0009,
+            NodeObjectFaultDescription::RepairSafetyDevice(index) => 0x000a + ((*index) as u16),
+            NodeObjectFaultDescription::RepairSwitch(index) => 0x0014 + ((*index) as u16),
+            NodeObjectFaultDescription::RepairSensor(index) => 0x001e + ((*index) as u16),
+            NodeObjectFaultDescription::RepairComponent(index) => 0x003c + ((*index) as u16),
+            NodeObjectFaultDescription::RepairControlBoard(index) => 0x005a + ((*index) as u16),
+            NodeObjectFaultDescription::RepairUserDefined(value) => *value,
+            NodeObjectFaultDescription::EchonetMiddleware(value) => *value,
+            NodeObjectFaultDescription::Indeterminate => 0x03ff
+        }
+    }
+}
+    
+/// Allow conversion from a u16
+impl TryFrom<u16> for NodeObjectFaultDescription {
+    type Error = &'static str;
+
+    fn try_from(v: u16) -> Result<Self, Self::Error> {
+        NodeObjectFaultDescription::try_from_u16(v)
+    }
+}
+
+
+#[derive(PartialEq, Debug, Display)]
+pub enum NodeObjectInstallationLocation {
+    LivingRoom(u8),
+    DiningRoom(u8),
+    Kitchen(u8),
+    Bathroom(u8),
+    Lavatory(u8),
+    Washroom(u8),
+    Passageway(u8),
+    Room(u8),
+    Stairway(u8),
+    FrontDoor(u8),
+    Storeroom(u8),
+    Garden(u8),
+    Garage(u8),
+    Veranda(u8),
+    Other(u8),
+    UserDefined(u32),
+    NotSpecified,
+    Indefinite,
+    #[display("Location (longitude: {_0}, latitude: {_1}, elevation: {_2})")]
+    Location(f64, f64, f64),
+    LocationInformationCode(u64)
 }
 
 /// Node capabilities
@@ -507,67 +633,7 @@ pub struct NodeDeviceObjectEchonetLiteSupportedVersion {
     pub revision: u8,
 }
 
-/// Holder for the fault information
-#[derive(Clone, Copy, Debug, Default, Display, Eq, Hash, Ord, PartialEq, PartialOrd)]
-#[display("{}", _0)]
-#[repr(transparent)]
-pub struct NodeObjectFaultContent(pub(in super)u16);
-
-impl NodeObjectFaultContent {
-    pub fn has_fault(&self) -> bool {
-        self.0 == 0x00
-    }
-
-    pub fn details(&self) -> Result<NodeObjectFaultDetails, EpcError> {
-        let high_byte = (self.0 >> 8) as u8 & 0xff;
-        let low_byte = (self.0 as u8) & 0xff;
-
-        if 0x01 <= low_byte && low_byte <= 0x09 {
-            match low_byte {
-                0x01 => Ok(NodeObjectFaultDetails::Recoverable("power-cycle".to_owned(), high_byte)),
-                0x02 => Ok(NodeObjectFaultDetails::Recoverable("push reset".to_owned(), high_byte)),
-                0x03 => Ok(NodeObjectFaultDetails::Recoverable("physical adjustment".to_owned(), high_byte)),
-                0x04 => Ok(NodeObjectFaultDetails::Recoverable("resources required".to_owned(), high_byte)),
-                0x05 => Ok(NodeObjectFaultDetails::Recoverable("cleaning required".to_owned(), high_byte)),
-                0x06 => Ok(NodeObjectFaultDetails::Recoverable("battery replacement".to_owned(), high_byte)),
-                0x09 => Ok(NodeObjectFaultDetails::Recoverable("manufacturer defined".to_owned(), high_byte)),
-                _ => Err(EpcError::InvalidValue(EPC_FAULT_CONTENT, format!("Invalid fault content: 0x{:04x}", self.0)))
-            }
-        } else if 0x0a <= low_byte && low_byte <= 0x13 {
-            Ok(NodeObjectFaultDetails::RepairRequired("abnormal event or safety tripped".to_owned(), high_byte))
-        } else if 0x14 <= low_byte && low_byte <= 0x1d {
-            Ok(NodeObjectFaultDetails::RepairRequired("fault in switch".to_owned(), high_byte))
-        } else if 0x1e <= low_byte && low_byte <= 0x3b {
-            Ok(NodeObjectFaultDetails::RepairRequired("fault in sensor system".to_owned(), high_byte))
-        } else if 0x3c <= low_byte && low_byte <= 0x59 {
-            Ok(NodeObjectFaultDetails::RepairRequired("component fault".to_owned(), high_byte))
-        } else if 0x5a <= low_byte && low_byte <= 0x6e {
-            Ok(NodeObjectFaultDetails::RepairRequired("control circuit board failure".to_owned(), high_byte))
-        } else if 0x006f <= self.0 && self.0 <= 0x03e8 {
-            Ok(NodeObjectFaultDetails::Indeterminate(self.0))
-        } else if 0x03e9 <= self.0 && self.0 <= 0x03ec {
-            Ok(NodeObjectFaultDetails::EchonetMiddleware(self.0))
-        } else {
-            Err(EpcError::InvalidValue(EPC_FAULT_CONTENT, "Invalid fault content".to_owned()))
-        }
-    }
-}
-
-impl Deref for NodeObjectFaultContent {
-    type Target = u16;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for NodeObjectFaultContent {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
 /// Holder for Unique Identifier Data
-/// Holder for the fault information
 #[derive(Clone, Copy, Debug, Default, Display, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[display("{}", _0)]
 #[repr(transparent)]
@@ -795,6 +861,9 @@ impl std::fmt::Display for NodeObjectPropertyMap {
     }
 }
 
+/// Holder for the node instance count (hacky u24 type)
+#[derive(Clone, Copy, Debug, Default, Display, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct NodeObjectInstanceCount(pub(in super) u32);
 
 /// ECHONET Lite Object Specification (in-node addressing)
 /// A node can contain multiple objects which are addressable through the "ECHONET Lite Object Spefification" (EOJ)
@@ -802,6 +871,7 @@ impl std::fmt::Display for NodeObjectPropertyMap {
 /// * Profile Objects. These define the device capabiltiies and pointers into the device objects
 #[derive(Clone, Copy, Debug, Display)]
 #[display("group: 0x{:02x} class: 0x{:02x} instance: 0x{:02x}", class_group_code, class_code, instance_code)]
+#[repr(packed)]
 pub struct EOJ {
     class_group_code: u8, // E.g. sensors, home equipment, etc
     class_code: u8, // The specific type, e.g. a presence sensor
@@ -815,6 +885,28 @@ impl EOJ {
             class_group_code: group_class.class_group_code,
             class_code: group_class.class_code,
             instance_code: instance,
+        }
+    }
+
+    /// Raw copy from an existing slice. Can do this because the struct is packed and only
+    /// consists of u8 values.
+    /// 
+    /// This will create a new EOJ, without validating whether group and class
+    pub unsafe fn from_bytes(buf: &[u8; std::mem::size_of::<Self>()]) -> Self {
+        let mut uninit_struct = MaybeUninit::<EOJ>::uninit();
+        unsafe {
+            uninit_struct.as_mut_ptr().copy_from(buf.as_ptr().cast::<Self>(), 1);
+            uninit_struct.assume_init()
+        }
+    }
+
+    /// Get a reference to the struct as a u8 slice.
+    pub fn as_bytes<'a>(&'a self) -> &'a [u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                (self as *const EOJ) as *const u8,
+                std::mem::size_of::<Self>(),
+            )
         }
     }
 }

@@ -1,12 +1,11 @@
 //! Module containing all of the usable EPC types.
-use super::api::{HexString};
-use super::api::{Epc, EpcAccessRule, EpcWrapper, EpcError, EOJ};
-use super::api::{NodeDeviceObjectEchonetLiteSupportedVersion, NodeObjectFaultContent, NodeObjectUniqueIdentifier, NodeProfileObjectEchonetLiteSupportedVersion, NodeGroupClass, NodeObjectPropertyMap};
+use super::api::*;
 use chrono::Datelike;
+use core::f64;
 use std::any::Any;
-use std::cell::{Cell, Ref, RefCell};
+use std::cell::{Cell, RefCell};
 use std::fmt::{Debug, Display};
-use std::ops::Deref;
+use std::{u8, u32};
 
 #[cfg(test)]
 mod tests;
@@ -15,8 +14,13 @@ mod tests;
 // EPC Constants
 ///////////////////////////////////////////////////////////////////////////////
 pub const EPC_OPERATING_STATUS: u8 = 0x80;
+pub const EPC_INSTALLATION_LOCATION: u8 = 0x81;
 pub const EPC_VERSION_INFORMATION: u8 = 0x82;
 pub const EPC_IDENTIFICATION_NUMBER: u8 = 0x83;
+pub const EPC_MEASURED_INSTANTANEOUS_POWER_CONSUMPTION: u8 = 0x84;
+pub const EPC_MEASURED_CUMULATIVE_POWER_CONSUMPTION: u8 = 0x85;
+pub const EPC_MANUFACTURERS_FAULT_CODE: u8 = 0x86;
+pub const EPC_CURRENT_LIMIT_SETTING: u8 = 0x87;
 pub const EPC_FAULT_STATUS: u8 = 0x88;
 pub const EPC_FAULT_CONTENT: u8 = 0x89;
 pub const EPC_MANUFACTURER_CODE: u8 = 0x8a;
@@ -24,6 +28,12 @@ pub const EPC_BUSINESS_FACILITY_CODE: u8 = 0x8b;
 pub const EPC_PRODUCT_CODE: u8 = 0x8c;
 pub const EPC_SERIAL_NUMBER: u8 = 0x8d;
 pub const EPC_PRODUCTION_DATE: u8 = 0x8e;
+pub const EPC_POWER_SAVING: u8 = 0x8f;
+pub const EPC_REMOTE_CONTROL: u8 = 0x93;
+pub const EPC_CURRENT_TIME: u8 = 0x97;
+pub const EPC_CURRENT_DATE: u8 = 0x98;
+pub const EPC_POWER_LIMIT: u8 = 0x99;
+pub const EPC_CUMULATIVE_OPERATING_TIME: u8 = 0x9a;
 pub const EPC_ANNOUNCEMENT_PROPERTY_MAP: u8 = 0x9d;
 pub const EPC_SET_PROPERTY_MAP: u8 = 0x9e;
 pub const EPC_GET_PROPERTY_MAP: u8 = 0x9f;
@@ -49,6 +59,8 @@ const NODE_MESSAGE_FORMAT_ARBITRARY: u8 = 0x02;
 // This is dumb rust, these are absolutely known at compile time...
 macro_rules! ERR_MSG_INVALID_BOOLEAN {() => ("did not match true or false value");}
 macro_rules! ERR_INVALID_LENGTH {() => ("Invalid length, expected {} bytes, found {}");}
+macro_rules! ERR_INTEGER_UNDERFLOW {() => ("Integer underflow");}
+macro_rules! ERR_INTEGER_OVERFLOW {() => ("Integer overflow");}
 
 ///////////////////////////////////////////////////////////////////////////////
 // Types
@@ -362,40 +374,34 @@ fn boolean_property(name: &'static str, epc: u8, source: u16,
     announce: bool, get_operation: EpcAccessRule, set_operation: EpcAccessRule,
     true_value: u8, false_value: u8) -> Result<Box<dyn EpcWrapper>, EpcError>
 {
-    Ok(
-        Box::new(
-            StaticNodeProperty::new(
-                name,
-                epc,
-                source,
-                announce,
-                get_operation,
-                set_operation,
-                Box::new(move |_, canonical| {
-                    let mut internal = vec![0x00; 3];
-                    internal[2] = if *canonical {true_value} else {false_value};
-                    Ok(internal)
-                }),
-                Box::new(move |epc: &dyn Epc<Canonical = bool>, internal|
-                    if internal[2] == true_value {
-                        Ok(true)
-                    } else if internal[2] == false_value {
-                        Ok(false)
-                    } else {
-                        Err(EpcError::InvalidValue(epc.epc(), ERR_MSG_INVALID_BOOLEAN!().to_owned()))
-                    }
-                ),
-                Box::new(move |epc: &dyn Epc<Canonical = bool>, internal|
-                    if internal.len() != 3 {
-                        Err(EpcError::InvalidValue(epc.epc(), format!(ERR_INVALID_LENGTH!(), 3, internal.len())))
-                    } else if internal[0] == true_value || internal[0] == false_value {
-                        return Ok(true)
-                    } else {
-                        Err(EpcError::InvalidValue(epc.epc(), ERR_MSG_INVALID_BOOLEAN!().to_owned()))
-                    }                
-                ),
-            )
-        )
+    general_property(
+        name,
+        epc,
+        source,
+        announce,
+        get_operation,
+        set_operation,
+        move |_, canonical| {
+            let mut internal = vec![0x00; 3];
+            internal[2] = if *canonical {true_value} else {false_value};
+            Ok(internal)
+        },
+        move |epc: &dyn Epc<Canonical = bool>, internal|
+            if internal[2] == true_value {
+                Ok(true)
+            } else if internal[2] == false_value {
+                Ok(false)
+            } else {
+                Err(EpcError::InvalidValue(epc.epc(), ERR_MSG_INVALID_BOOLEAN!().to_owned()))
+            },
+        move |epc: &dyn Epc<Canonical = bool>, internal|
+            if internal.len() != 3 {
+                Err(EpcError::InvalidValue(epc.epc(), format!(ERR_INVALID_LENGTH!(), 3, internal.len())))
+            } else if internal[0] == true_value || internal[0] == false_value {
+                return Ok(true)
+            } else {
+                Err(EpcError::InvalidValue(epc.epc(), ERR_MSG_INVALID_BOOLEAN!().to_owned()))
+            }
     )
 }
 
@@ -404,28 +410,22 @@ fn hex_string_property(name: &'static str, epc: u8, source: u16,
     announce: bool, get_operation: EpcAccessRule, set_operation: EpcAccessRule,
     validator: impl Fn(&dyn Epc<Canonical = HexString>, &[u8]) -> Result<bool, EpcError> + 'static) -> Result<Box<dyn EpcWrapper>, EpcError>
 {
-    Ok(
-        Box::new(
-            StaticNodeProperty::new(
-                name,
-                epc,
-                source,
-                announce,
-                get_operation,
-                set_operation,
-                Box::new(move |epc: &dyn Epc<Canonical = HexString>, canonical| {
-                    let mut internal = vec![0x00_u8; canonical.byte_len() + 2];
-                    match canonical.decode_into_slice(&mut internal[2..]) {
-                        Ok(_) => Ok(internal),
-                        Err(err) => Err(EpcError::InvalidValue(epc.epc(), err.to_string()))
-                    }
-                }),
-                Box::new(move |_: &dyn Epc<Canonical = HexString>, internal|
-                    Ok((&internal[2..]).into())
-                ),
-                Box::new(validator),
-            )
-        )
+    general_property(
+        name,
+        epc,
+        source,
+        announce,
+        get_operation,
+        set_operation,
+        move |epc: &dyn Epc<Canonical = HexString>, canonical| {
+            let mut internal = vec![0x00_u8; canonical.byte_len() + 2];
+            match canonical.decode_into_slice(&mut internal[2..]) {
+                Ok(_) => Ok(internal),
+                Err(err) => Err(EpcError::InvalidValue(epc.epc(), err.to_string()))
+            }
+        },
+        move |_: &dyn Epc<Canonical = HexString>, internal| Ok((&internal[2..]).into()),
+        validator
     )
 }
 
@@ -434,68 +434,90 @@ fn ascii_string_property(name: &'static str, epc: u8, source: u16,
     announce: bool, get_operation: EpcAccessRule, set_operation: EpcAccessRule,
     validator: impl Fn(&dyn Epc<Canonical = String>, &[u8]) -> Result<bool, EpcError> + 'static) -> Result<Box<dyn EpcWrapper>, EpcError>
 {
-    Ok(
-        Box::new(
-            StaticNodeProperty::new(
-                name,
-                epc,
-                source,
-                announce,
-                get_operation,
-                set_operation,
-                Box::new(move |epc: &dyn Epc<Canonical = String>, canonical|
-                    if canonical.is_ascii() {
-                        let mut internal = vec![0x00_u8; canonical.len() + 2];
-                        (&mut internal[2..]).copy_from_slice(canonical.as_bytes());
-                        Ok(internal)
-                    } else {
-                        Err(EpcError::InvalidValue(epc.epc(), "Invalid ASCII characters found".to_owned()))
-                    }
-                ),
-                Box::new(move |_: &dyn Epc<Canonical = String>, internal|
-                    unsafe { Ok(String::from_utf8_unchecked((&internal[2..]).to_vec())) }),
-                Box::new(move |epc, internal|
-                    if (&internal[2..]).iter().all(|&b| (b as char).is_ascii()) {
-                        validator(epc, internal)
-                    } else {
-                        Err(EpcError::InvalidValue(epc.epc(), "Invalid ASCII characters found".to_owned()))
-                    }
-                )
-            )
-        )
+    general_property(
+        name,
+        epc,
+        source,
+        announce,
+        get_operation,
+        set_operation,
+        move |epc: &dyn Epc<Canonical = String>, canonical|
+            if canonical.is_ascii() {
+                let mut internal = vec![0x00_u8; canonical.len() + 2];
+                (&mut internal[2..]).copy_from_slice(canonical.as_bytes());
+                Ok(internal)
+            } else {
+                Err(EpcError::InvalidValue(epc.epc(), "Invalid ASCII characters found".to_owned()))
+            },
+        move |_: &dyn Epc<Canonical = String>, internal|
+            unsafe { Ok(String::from_utf8_unchecked((&internal[2..]).to_vec())) },
+        move |epc, internal|
+            if (&internal[2..]).iter().all(|&b| (b as char).is_ascii()) {
+                validator(epc, internal)
+            } else {
+                Err(EpcError::InvalidValue(epc.epc(), "Invalid ASCII characters found".to_owned()))
+            }
     )
 }
 
-/// Integer trait for constrianing the integer property type
+/// Integer trait for constrianing the integer property type.
+/// Overflow and underflow methods are purposely on buffers due to odd sized integers
+/// and otherwise causing a to_canonical conversion from validate.
 trait Integer {
     const SIZE: usize;
     fn to_be_bytes(self) -> [u8; Self::SIZE];
     fn from_be_bytes(bytes: [u8; Self::SIZE]) -> Self;
+    fn is_underflow(bytes: [u8; Self::SIZE]) -> bool;
+    fn is_overflow(bytes: [u8; Self::SIZE]) -> bool;
 }
 
 /// Allow generic u16 integers
 impl Integer for u16 {
     const SIZE: usize = std::mem::size_of::<Self>();
 
+    #[inline(always)]
     fn to_be_bytes(self) -> [u8; Self::SIZE] {
         self.to_be_bytes()
     }
     
+    #[inline(always)]
     fn from_be_bytes(bytes: [u8; Self::SIZE]) -> Self {
         u16::from_be_bytes(bytes)
     }
+
+    #[inline(always)]
+    fn is_underflow(bytes: [u8; Self::SIZE]) -> bool {
+        bytes == [0xff, 0xfe]
+    }
+
+    #[inline(always)]
+    fn is_overflow(bytes: [u8; Self::SIZE]) -> bool {
+        bytes == [0xff, 0xff]
+    }
 }
 
-/// Allow NodeObjectFaultContent
-impl Integer for NodeObjectFaultContent {
+/// Allow generic u32 integers
+impl Integer for u32 {
     const SIZE: usize = std::mem::size_of::<Self>();
 
+    #[inline(always)]
     fn to_be_bytes(self) -> [u8; Self::SIZE] {
-        self.0.to_be_bytes()
+        self.to_be_bytes()
     }
     
+    #[inline(always)]
     fn from_be_bytes(bytes: [u8; Self::SIZE]) -> Self {
-        NodeObjectFaultContent(u16::from_be_bytes(bytes))
+        u32::from_be_bytes(bytes)
+    }
+
+    #[inline(always)]
+    fn is_underflow(bytes: [u8; Self::SIZE]) -> bool {
+        bytes == [0xff, 0xff, 0xff, 0xfe]
+    }
+
+    #[inline(always)]
+    fn is_overflow(bytes: [u8; Self::SIZE]) -> bool {
+        bytes == [0xff, 0xff, 0xff, 0xff]
     }
 }
 
@@ -503,50 +525,243 @@ impl Integer for NodeObjectFaultContent {
 impl Integer for NodeObjectUniqueIdentifier {
     const SIZE: usize = std::mem::size_of::<Self>();
 
+    #[inline(always)]
     fn to_be_bytes(self) -> [u8; Self::SIZE] {
         self.0.to_be_bytes()
     }
     
+    #[inline(always)]
     fn from_be_bytes(bytes: [u8; Self::SIZE]) -> Self {
         NodeObjectUniqueIdentifier(u16::from_be_bytes(bytes))
     }
+
+    #[inline(always)]
+    fn is_underflow(_: [u8; Self::SIZE]) -> bool {
+        false
+    }
+
+    #[inline(always)]
+    fn is_overflow(_: [u8; Self::SIZE]) -> bool {
+        false
+    }
+}
+
+// Allow NodeObjectInstanceCount. This is a hacky 3 byte integer.
+impl Integer for NodeObjectInstanceCount {
+    const SIZE: usize = 3;
+
+    // WARNING: this will lose precision if the internal value is set higher than 0xffffff
+    #[inline(always)]
+    fn to_be_bytes(self) -> [u8; Self::SIZE] {
+        if self.0 >= 0x00ffffff {
+            // Set the overflow status
+            [0xff_u8; Self::SIZE]
+        } else {
+            let mut buf = [0x00_u8; Self::SIZE];
+            let bytes = self.0.to_be_bytes();
+            let start = std::mem::size_of::<Self>() - Self::SIZE;
+            (&mut buf[..]).copy_from_slice(&bytes[start..]);
+            buf
+        }
+    }
+    
+    #[inline(always)]
+    fn from_be_bytes(bytes: [u8; Self::SIZE]) -> Self {
+        let mut buf = [0x00_u8; std::mem::size_of::<u32>()];
+        let start = std::mem::size_of::<Self>() - Self::SIZE;
+        (&mut buf[start..]).copy_from_slice(&bytes[..]);
+        NodeObjectInstanceCount(u32::from_be_bytes(buf))
+    }
+
+    #[inline(always)]
+    fn is_underflow(bytes: [u8; Self::SIZE]) -> bool {
+        bytes == [0xff, 0xff, 0xfe]
+    }
+
+    #[inline(always)]
+    fn is_overflow(bytes: [u8; Self::SIZE]) -> bool {
+        bytes == [0xff, 0xff, 0xff]
+    }
+}
+
+/// Simple wrapper for integer types where the network value is the same size as the canonical value. This allows a straight
+/// passthrough.
+fn integer_property<T>(name: &'static str, epc: u8, source: u16,
+    announce: bool, get_operation: EpcAccessRule, set_operation: EpcAccessRule) -> Result<Box<dyn EpcWrapper>, EpcError>
+where
+    T: Integer + Display + Debug + Copy + 'static,
+    [(); T::SIZE]: Sized
+{
+    integer_property_validated(
+        name,
+        epc,
+        source,
+        announce,
+        get_operation,
+        set_operation,
+        move |_, _| Ok(true)
+    )
 }
 
 /// Generic handler for integer type properties
-fn integer_property<T>(name: &'static str, epc: u8, source: u16,
+fn integer_property_validated<T>(name: &'static str, epc: u8, source: u16,
     announce: bool, get_operation: EpcAccessRule, set_operation: EpcAccessRule,
     validator: impl Fn(&dyn Epc<Canonical = T>, &[u8]) -> Result<bool, EpcError> + 'static) -> Result<Box<dyn EpcWrapper>, EpcError>
 where
     T: Integer + Display + Debug + Copy + 'static,
     [(); T::SIZE]: Sized
 {
-    Ok(
-        Box::new(
-            StaticNodeProperty::new(
-                name,
-                epc,
-                source,
-                announce,
-                get_operation,
-                set_operation,
-                Box::new(move |_: &dyn Epc<Canonical = T>, canonical| {
-                    let mut internal = vec![0x00_u8; T::SIZE + 2];
-                    (&mut internal[2..]).copy_from_slice(&(canonical.to_be_bytes()));
-                    Ok(internal)
-                }),
-                Box::new(move |_: &dyn Epc<Canonical = T>, internal| {
-                    let buf: [u8; T::SIZE] = (&internal[2..]).try_into().unwrap();
-                    Ok(T::from_be_bytes(buf))
-                }),
-                Box::new(move |epc, internal|
-                    if internal.len() == T::SIZE + 2 {
-                        validator(epc, internal)
+    general_property(
+        name,
+        epc,
+        source,
+        announce,
+        get_operation,
+        set_operation,
+        move |_: &dyn Epc<Canonical = T>, canonical| {
+            let mut internal = vec![0x00_u8; T::SIZE + 2];
+            (&mut internal[2..]).copy_from_slice(&(canonical.to_be_bytes()));
+            Ok(internal)
+        },
+        move |_: &dyn Epc<Canonical = T>, internal| {
+            let buf: [u8; T::SIZE] = (&internal[2..]).try_into().unwrap();
+            Ok(T::from_be_bytes(buf))
+        },
+        move |epc, internal|
+            if internal.len() != T::SIZE + 2 {
+                Err(EpcError::InvalidValue(epc.epc(), format!(ERR_INVALID_LENGTH!(), T::SIZE + 2, internal.len())))
+            } else {
+                let buf: [u8; T::SIZE] = (&internal[2..]).try_into().unwrap();
+                if T::is_underflow(buf) {
+                    Err(EpcError::InvalidValue(epc.epc(), ERR_INTEGER_UNDERFLOW!().to_owned()))
+                } else if T::is_overflow(buf) {
+                    Err(EpcError::InvalidValue(epc.epc(), ERR_INTEGER_OVERFLOW!().to_owned().to_owned()))
+                } else {
+                    validator(epc, internal)
+                }
+            }
+    )
+}
+
+trait ValidUnsignedIntegerSizes<const N: usize> {}
+impl ValidUnsignedIntegerSizes<1> for () {}
+impl ValidUnsignedIntegerSizes<2> for () {}
+impl ValidUnsignedIntegerSizes<4> for () {}
+
+/// Types that are a float mapped into an integer property. `N` is the number of integer bytes.
+/// Due to how the values are used, the validator only works on canonical values. This is a special case,
+/// and causes the to_canonical to be invoked as part of the validation. A key limitation to this is that
+/// it cannot hold negative values.
+/// # Arguments
+///
+/// * `max_value` - The specified maximum value.
+/// * `precision` - The nuumber of decimal places to store. E.g. 3 == 0.001
+fn unsigned_integer_packed_float_property<const N: usize>(name: &'static str, epc: u8, source: u16,
+    announce: bool, get_operation: EpcAccessRule, set_operation: EpcAccessRule,
+    max_value: f64, precision: u8) -> Result<Box<dyn EpcWrapper>, EpcError>
+where
+    (): ValidUnsignedIntegerSizes<N>
+{
+    // Should really do this as a compile time check, but doing it here at least is a startup check.
+    let divisor = 1.0_f64 / 10.0_f64.powi(precision as i32);
+    let actual_max_value = (max_value / divisor).ceil();
+    let type_max_value = match N {
+                1 => (u8::MAX - 2) as f64,
+                2 => (u16::MAX - 2) as f64,
+                4 => (u32::MAX - 2) as f64,
+                _ => unreachable!()
+            };
+    if actual_max_value > type_max_value {
+        return Err(EpcError::ValueTooLarge(epc, "Specified maximum value exceeds the underlying type size".to_owned()))
+    }
+
+    general_property(
+        name,
+        epc,
+        source,
+        announce,
+        get_operation,
+        set_operation,
+        move |epc: &dyn Epc<Canonical = f64>, canonical| {
+            let val = ((*canonical) / divisor).round();            
+            let mut buf: Vec<u8> = vec![0x00_u8; N + 2];
+
+            if val == -0.00 || (val >= 0.0 && val <= actual_max_value) {
+                match N {
+                    1 => buf[2] = val as u8,
+                    2 => (&mut buf[2..]).copy_from_slice((val as u16).to_be_bytes().as_slice()),
+                    4 => (&mut buf[2..]).copy_from_slice((val as u32).to_be_bytes().as_slice()),
+                    _ => unreachable!()
+                }
+                Ok(buf)
+            } else if val.is_nan() {
+                Err(EpcError::InvalidValue(epc.epc(), "Unable to represent NAN".to_owned()))
+            } else if val.is_sign_negative() {
+                log::debug!("EPC {:02x}: {}", epc.epc(), ERR_INTEGER_UNDERFLOW!());
+                buf.fill(0xff);
+                buf[N + 1] = 0xfe;
+                Ok(buf)
+            } else {
+                log::debug!("EPC {:02x}: {}", epc.epc(), ERR_INTEGER_OVERFLOW!());
+                buf.fill(0xff);
+                Ok(buf)
+            }
+        },
+        move |epc: &dyn Epc<Canonical = f64>, internal| {
+            let mut underflow_slice = vec![0xff_u8; N];
+            underflow_slice[N-1] = 0xfe;
+            let overflow_slice = vec![0xff_u8; N];
+            let value_slice = &internal[2..];
+
+            if value_slice == underflow_slice {
+                log::debug!("EPC {:02x}: {}", epc.epc(), ERR_INTEGER_UNDERFLOW!());
+                Ok(f64::NEG_INFINITY)
+            } else if value_slice == overflow_slice {
+                log::debug!("EPC {:02x}: {}", epc.epc(), ERR_INTEGER_OVERFLOW!());
+                Ok(f64::INFINITY)
+            } else {
+                // Conversion to integer first. This is pretty hacky. u32 is the biggest type
+                // defined by ECHONET Lite. Length has been validated before, so can safely
+                // ignore the result.
+                let int_value = match N {
+                    1 => value_slice[0] as u32,
+                    2 => u16::from_be_bytes(value_slice.try_into().unwrap()) as u32,
+                    4 => u32::from_be_bytes(value_slice.try_into().unwrap()),
+                    _ => unreachable!()
+                };
+                Ok((int_value as f64) * divisor)
+            }
+        },
+        move |epc, internal|
+            if internal.len() != N + 2 {
+                Err(EpcError::InvalidValue(epc.epc(), format!(ERR_INVALID_LENGTH!(), N + 2, internal.len())))
+            } else {
+                // Convert to an integer of size and do the comparison. This is a bit of a duplication, but
+                // safer and quicker than converting to a float for comparison. Should really do the max
+                // value check as a compile time optimisation.
+                let value_slice = &internal[2..];
+                let actual_value = match N {
+                    1 => value_slice[0] as u32,
+                    2 => u16::from_be_bytes(value_slice.try_into().unwrap()) as u32,
+                    4 => u32::from_be_bytes(value_slice.try_into().unwrap()),
+                    _ => unreachable!()
+                };
+
+                if actual_value <= actual_max_value as u32 {
+                    Ok(true)
+                } else {
+                    let mut underflow_slice = vec![0xff_u8; N];
+                    underflow_slice[N-1] = 0xfe;
+                    let overflow_slice = vec![0xff_u8; N];
+
+                    // Check if an overflow value
+                    if value_slice == underflow_slice || value_slice == overflow_slice {
+                        Ok(true)
                     } else {
-                        Err(EpcError::InvalidValue(epc.epc(), format!(ERR_INVALID_LENGTH!(), T::SIZE + 2, internal.len())))
+                        Err(EpcError::ValueTooLarge(epc.epc(), "Value exceeds specified type maximum".to_owned()))
                     }
-                ),
-            )
-        )
+                }
+            }
     )
 }
 
@@ -555,43 +770,38 @@ fn date_property(name: &'static str, epc: u8, source: u16,
     announce: bool, get_operation: EpcAccessRule, set_operation: EpcAccessRule,
     validator: impl Fn(&dyn Epc<Canonical = chrono::NaiveDate>, &[u8]) -> Result<bool, EpcError> + 'static) -> Result<Box<dyn EpcWrapper>, EpcError>
 {
-    Ok(
-        Box::new(
-            StaticNodeProperty::new(
-                name,
-                epc,
-                source,
-                announce,
-                get_operation,
-                set_operation,
-                Box::new(move |_: &dyn Epc<Canonical = chrono::NaiveDate>, canonical| {
-                    let mut buf = vec![0x00; 6];
-                    (&mut buf[2..4]).copy_from_slice(&(canonical.year() as i16).to_be_bytes());
-                    buf[4] = canonical.month() as u8;
-                    buf[5] = canonical.day() as u8;
-                    Ok(buf)
-                }),
-                Box::new(move |epc: &dyn Epc<Canonical = chrono::NaiveDate>, internal| {
-                    let year = u16::from_be_bytes(internal[2..4].try_into().unwrap()) as i32;
-                    let month = internal[4] as u32;
-                    let day = internal[5] as u32;
+    general_property(
+        name,
+        epc,
+        source,
+        announce,
+        get_operation,
+        set_operation,
+        move |_: &dyn Epc<Canonical = chrono::NaiveDate>, canonical| {
+            let mut buf = vec![0x00; 6];
+            (&mut buf[2..4]).copy_from_slice(&(canonical.year() as i16).to_be_bytes());
+            buf[4] = canonical.month() as u8;
+            buf[5] = canonical.day() as u8;
+            Ok(buf)
+        },
+        move |epc: &dyn Epc<Canonical = chrono::NaiveDate>, internal| {
+            let year = u16::from_be_bytes(internal[2..4].try_into().unwrap()) as i32;
+            let month = internal[4] as u32;
+            let day = internal[5] as u32;
 
-                    let maybe_canonical = chrono::NaiveDate::from_ymd_opt(year, month, day);
-                    if let Some(canonical) = maybe_canonical {
-                        Ok(canonical)
-                    } else {
-                        return Err(EpcError::InvalidValue(epc.epc(), "error parsing date".to_owned()));
-                    }
-                }),
-                Box::new(move |epc, internal|
-                    if internal.len() == 6 {
-                        validator(epc, internal)
-                    } else {
-                        Err(EpcError::InvalidValue(epc.epc(), format!(ERR_INVALID_LENGTH!(), 6, internal.len())))
-                    }
-                )
-            )
-        )
+            let maybe_canonical = chrono::NaiveDate::from_ymd_opt(year, month, day);
+            if let Some(canonical) = maybe_canonical {
+                Ok(canonical)
+            } else {
+                return Err(EpcError::InvalidValue(epc.epc(), "error parsing date".to_owned()));
+            }
+        },
+        move |epc, internal|
+            if internal.len() == 6 {
+                validator(epc, internal)
+            } else {
+                Err(EpcError::InvalidValue(epc.epc(), format!(ERR_INVALID_LENGTH!(), 6, internal.len())))
+            }
     )
 }
 
@@ -599,36 +809,28 @@ fn date_property(name: &'static str, epc: u8, source: u16,
 fn property_map_property(name: &'static str, epc: u8, source: u16,
     announce: bool, get_operation: EpcAccessRule, set_operation: EpcAccessRule) -> Result<Box<dyn EpcWrapper>, EpcError>
 {    
-    Ok(
-        Box::new(
-            StaticNodeProperty::new(
-                name,
-                epc,
-                source,
-                announce,
-                get_operation,
-                set_operation,
-                Box::new(move |_: &dyn Epc<Canonical = NodeObjectPropertyMap>, canonical| {
-                    // To avoid a copy we need to calculate the size of the buffer needed based on the type. This required
-                    // knowledge of how the struct will serialise.
-                    // FIXME 
-                    Ok(canonical.decode())
-                }),
-                Box::new(move |epc: &dyn Epc<Canonical = NodeObjectPropertyMap>, internal| 
-                    match NodeObjectPropertyMap::from_bytes(&internal[2..]) {
-                        Ok(canonical) => Ok(canonical),
-                        Err(err) => Err(EpcError::InvalidValue(epc.epc(), format!("{}", err)))
-                    }
-                ),
-                Box::new(move |epc, internal|
-                    if internal.len() > 2 && ((internal[1] < 16 && ((internal[1] + 2) as usize == internal.len())) || internal.len() == 17) {
-                        Ok(true)
-                    } else {
-                        Err(EpcError::InvalidValue(epc.epc(), "Invalid data length".to_owned()))
-                    }
-                )
-            )
-        )
+    general_property(
+        name,
+        epc,
+        source,
+        announce,
+        get_operation,
+        set_operation,
+        move |_: &dyn Epc<Canonical = NodeObjectPropertyMap>, canonical|
+            // FIXME: To avoid a copy we need to calculate the size of the buffer needed based on the type.
+            // requires knoweldge of how the struct will decode
+            Ok(canonical.decode()),
+        move |epc: &dyn Epc<Canonical = NodeObjectPropertyMap>, internal| 
+            match NodeObjectPropertyMap::from_bytes(&internal[2..]) {
+                Ok(canonical) => Ok(canonical),
+                Err(err) => Err(EpcError::InvalidValue(epc.epc(), format!("{}", err)))
+            },
+        move |epc, internal|
+            if internal.len() > 2 && ((internal[1] < 16 && ((internal[1] + 2) as usize == internal.len())) || internal.len() == 17) {
+                Ok(true)
+            } else {
+                Err(EpcError::InvalidValue(epc.epc(), "Invalid data length".to_owned()))
+            }
     )
 }
 
@@ -654,39 +856,77 @@ impl std::fmt::Display for EOJVec {
 /// Handler for a list of EOJ bytes
 fn eoj_array_property(name: &'static str, epc: u8, source: u16,
     announce: bool, get_operation: EpcAccessRule, set_operation: EpcAccessRule) -> Result<Box<dyn EpcWrapper>, EpcError>
-{    
-    Ok(
-        Box::new(
-            StaticNodeProperty::new(
-                name,
-                epc,
-                source,
-                announce,
-                get_operation,
-                set_operation,
-                Box::new(move |_: &dyn Epc<Canonical = EOJVec>, canonical|
-                    todo!()
-                ),
-                Box::new(move |epc: &dyn Epc<Canonical = EOJVec>, internal| 
-                    todo!()
-                ),
-                Box::new(move |epc, internal|
-                    // Simple validator. May decide we need to verify the EPC codes at a later time.
-                    Ok(internal.len() >= 2 && (internal[1] as usize) % 3 == 0) 
-                )
-            )
-        )
+{
+    general_property(
+        name,
+        epc,
+        source,
+        announce,
+        get_operation,
+        set_operation,
+        move |_: &dyn Epc<Canonical = EOJVec>, canonical| {
+            // Since we know that the EOJ is a vec, and vec has an underlying continious buffer,
+            // then just copy the canonical buffer into a new buffer.
+            let src_ptr = canonical.0.as_ptr() as *const u8;
+            let dst_len = canonical.0.len() * std::mem::size_of::<EOJ>();
+            let mut dst: Vec<u8> = Vec::with_capacity(dst_len + 2);
+            unsafe {
+                dst.set_len(dst_len + 2);
+                dst.as_mut_ptr().add(2).copy_from(src_ptr, dst_len);
+            }
+            Ok(dst)
+        },
+        move |_: &dyn Epc<Canonical = EOJVec>, internal| {
+            // There might be a performance advantage in just doing a single copy, however
+            // it's complicated due to the allocation, and sizing. Simpler just to set
+            let eoj_count = (internal.len() - 2) / 3;
+            let mut eojs: Vec<EOJ> = Vec::with_capacity(eoj_count);
+            for i in 0..eoj_count {
+                let eoj_bytes = &internal[(i + 2)..(i + 2 + std::mem::size_of::<EOJ>())];
+                unsafe {
+                    eojs.push(EOJ::from_bytes(eoj_bytes.try_into().unwrap()));
+                }
+            }
+            Ok(EOJVec(eojs))
+        },
+        move |_, internal|
+            // Simple validator. May decide we need to verify the EPC codes at a later time.
+            Ok(internal.len() >= 2 && (internal.len() - 2) %3 == 0 && (internal[1] as usize) % 3 == 0)
     )
 }
 
 /// A simple length validator support function
 fn validate_length(epc_code: u8, internal: &[u8], len: usize) -> Result<bool, EpcError> {
-    if internal.len() == len {
+    if internal.len() == len + 2 {
         Ok(true)
     } else {
-        Err(EpcError::InvalidValue(epc_code, format!("expected {} bytes found {}", len, internal.len())))
+        Err(EpcError::InvalidValue(epc_code, format!("expected {} bytes found {}", len + 2, internal.len())))
     }
 }
+
+/// General properties where all properties need to be specified. This is a simple wrapper around property generation
+/// to remove come boxing/verbosity.
+fn general_property<T>(name: &'static str, epc: u8, source: u16,
+    announce: bool, get_operation: EpcAccessRule, set_operation: EpcAccessRule,
+    from_canonical: impl Fn(&dyn Epc<Canonical = T>, &T) -> Result<Vec<u8>, EpcError> + 'static,
+    to_canonical: impl Fn(&dyn Epc<Canonical = T>, &[u8]) -> Result<T, EpcError> + 'static,
+    validator: impl Fn(&dyn Epc<Canonical = T>, &[u8]) -> Result<bool, EpcError> + 'static) -> Result<Box<dyn EpcWrapper>, EpcError>
+where
+    T: Display + Debug + 'static,
+{
+    Ok(Box::new(StaticNodeProperty::new(
+        name,
+        epc,
+        source,
+        announce,
+        get_operation,
+        set_operation,
+        Box::new(from_canonical),
+        Box::new(to_canonical),
+        Box::new(validator)
+    )))
+}
+
 
 /// Profile object property factory for any given group/class and EPC
 /// Need to seperate device and profile because some of the implementations change for a property.
@@ -707,20 +947,102 @@ pub fn property_factory(group_class: &NodeGroupClass, epc: u8) -> Result<Box<dyn
                 EPC_OPERATION_STATUS_ON,
                 EPC_OPERATION_STATUS_OFF
             ),
+            EPC_INSTALLATION_LOCATION => Ok(Box::new(StaticNodeProperty::new(
+                "Installation Location",
+                epc,
+                EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_NONE,
+                true,
+                EpcAccessRule::Mandatory,
+                EpcAccessRule::Mandatory,
+                Box::new(move |epc: &dyn Epc<Canonical = NodeObjectInstallationLocation>, canonical |
+                    match canonical {
+                        NodeObjectInstallationLocation::LivingRoom(location_number) => Ok([0x00, 0x00, 0x08 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::DiningRoom(location_number) => Ok([0x00, 0x00, 0x10 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::Kitchen(location_number) => Ok([0x00, 0x00, 0x18 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::Bathroom(location_number) => Ok([0x00, 0x00, 0x20 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::Lavatory(location_number) => Ok([0x00, 0x00, 0x28 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::Washroom(location_number) => Ok([0x00, 0x00, 0x30 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::Passageway(location_number) => Ok([0x00, 0x00, 0x38 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::Room(location_number) => Ok([0x00, 0x00, 0x40 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::Stairway(location_number) => Ok([0x00, 0x00, 0x48 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::FrontDoor(location_number) => Ok([0x00, 0x00, 0x50 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::Storeroom(location_number) => Ok([0x00, 0x00, 0x58 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::Garden(location_number) => Ok([0x00, 0x00, 0x60 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::Garage(location_number) => Ok([0x00, 0x00, 0x68 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::Veranda(location_number) => Ok([0x00, 0x00, 0x70 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::Other(location_number) => Ok([0x00, 0x00, 0x78 | (location_number | 0x07)].to_vec()),
+                        NodeObjectInstallationLocation::UserDefined(value) => Ok(value.to_be_bytes().to_vec()),
+                        NodeObjectInstallationLocation::NotSpecified => Ok([0x00, 0x00, 0x00].to_vec()),
+                        NodeObjectInstallationLocation::Indefinite => Ok([0x00, 0x00, 0xff].to_vec()),
+                        NodeObjectInstallationLocation::Location(_, _, _) => {
+                            log::warn!("Location information is not supported");
+                            todo!()
+                        },
+                        NodeObjectInstallationLocation::LocationInformationCode(location_code) => {
+                            todo!();
+                            Ok([0x00, 0x00, 0x1B, 0x00, 0x00, 0x00, 0x00, 0x03].to_vec()) // FIXME
+                        }
+                    }
+                ),
+                Box::new(move |epc: &dyn Epc<Canonical = NodeObjectInstallationLocation>, internal| 
+                    match internal[2] {
+                        0x00 => Ok(NodeObjectInstallationLocation::NotSpecified),
+                        0x01 => {
+                            if &internal[3..12] == &[0x00, 0x00, 0x1B, 0x00, 0x00, 0x00, 0x00, 0x03] {
+                                Ok(NodeObjectInstallationLocation::LocationInformationCode(0))
+                            } else {
+                                log::warn!("Location information is not supported");
+                                todo!()
+                            }
+                        },
+                        0xff => {
+                            Ok(NodeObjectInstallationLocation::Indefinite)
+                        }
+                        _ => {
+                            if internal[2] & 0x00_u8 == 0x00 {
+                                let location_number = internal[2] & 0x07;
+                                match internal[2] & 0x78 {
+                                    0x08 => Ok(NodeObjectInstallationLocation::LivingRoom(location_number)),
+                                    0x10 => Ok(NodeObjectInstallationLocation::DiningRoom(location_number)),
+                                    0x18 => Ok(NodeObjectInstallationLocation::Kitchen(location_number)),
+                                    0x20 => Ok(NodeObjectInstallationLocation::Bathroom(location_number)),
+                                    0x28 => Ok(NodeObjectInstallationLocation::Lavatory(location_number)),
+                                    0x30 => Ok(NodeObjectInstallationLocation::Washroom(location_number)),
+                                    0x38 => Ok(NodeObjectInstallationLocation::Passageway(location_number)),
+                                    0x40 => Ok(NodeObjectInstallationLocation::Room(location_number)),
+                                    0x48 => Ok(NodeObjectInstallationLocation::Stairway(location_number)),
+                                    0x50 => Ok(NodeObjectInstallationLocation::FrontDoor(location_number)),
+                                    0x58 => Ok(NodeObjectInstallationLocation::Storeroom(location_number)),
+                                    0x60 => Ok(NodeObjectInstallationLocation::Garden(location_number)),
+                                    0x68 => Ok(NodeObjectInstallationLocation::Garage(location_number)),
+                                    0x70 => Ok(NodeObjectInstallationLocation::Veranda(location_number)),
+                                    0x78 => Ok(NodeObjectInstallationLocation::Other(location_number)),
+                                    _ => unreachable!()
+                                }
+                            } else {
+                                Ok(NodeObjectInstallationLocation::UserDefined((internal[2] & 0x7f_u8) as u32))
+                            }
+                        }
+                    }
+                ),
+                Box::new(move |_: &dyn Epc<Canonical = NodeObjectInstallationLocation>, internal| {
+                    Ok(internal.len() > 2 && (internal[0] == 0x01 && internal.len() == 17) || internal.len() == 3)
+                })
+            )) as Box<dyn EpcWrapper>),
             // This type is special. It contains the version supported AND the message type supported. However,
             // in ECHONET Lite, only the "specified message format" is supported, meaning that the if the device
             // advertisies "arbitrary message format", chances are we won't be able to interpret any messages from
             // the device. The actual message format is stored in EHD1/EHD2 headers. For here, we will just store
             // the value. This is complex because the device and profile types/uses differ significantly.
-            EPC_VERSION_INFORMATION => Ok(if is_profile {
-                Box::new(StaticNodeProperty::new(
+            EPC_VERSION_INFORMATION => if is_profile {
+                general_property(
                     "Version Information",
                     epc,
                     EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_CLASS,
                     false,
                     EpcAccessRule::Mandatory,
                     EpcAccessRule::NotSupported,
-                    Box::new(move |np: &dyn Epc<Canonical = NodeProfileObjectEchonetLiteSupportedVersion>, canonical|
+                    move |np: &dyn Epc<Canonical = NodeProfileObjectEchonetLiteSupportedVersion>, canonical|
                         if canonical.specified_message || canonical.arbiturary_message {
                             let mut internal = vec![0x00_u8; 6];
                             internal[2] = canonical.major_version;
@@ -729,15 +1051,14 @@ pub fn property_factory(group_class: &NodeGroupClass, epc: u8) -> Result<Box<dyn
                             Ok(internal)
                         } else {
                             return Err(EpcError::InvalidValue(np.epc(), "specified or arbitrary messages must be supported".to_owned()))
-                        }
-                    ),
-                    Box::new(move |_, internal| Ok(NodeProfileObjectEchonetLiteSupportedVersion {
+                        },
+                    move |_, internal| Ok(NodeProfileObjectEchonetLiteSupportedVersion {
                         major_version: internal[2],
                         minor_version: internal[3],
                         specified_message: (internal[4] & NODE_MESSAGE_FORMAT_SPECIFIED) == NODE_MESSAGE_FORMAT_SPECIFIED,
                         arbiturary_message: (internal[4] & NODE_MESSAGE_FORMAT_ARBITRARY) == NODE_MESSAGE_FORMAT_ARBITRARY,
-                    })),
-                    Box::new(move |epc, internal|
+                    }),
+                    move |epc, internal|
                         if internal.len() == 6 {
                             if (internal[4] & NODE_MESSAGE_FORMAT_SPECIFIED) == NODE_MESSAGE_FORMAT_SPECIFIED || (internal[4] & NODE_MESSAGE_FORMAT_ARBITRARY) == NODE_MESSAGE_FORMAT_ARBITRARY {
                                 Ok(true)
@@ -747,27 +1068,26 @@ pub fn property_factory(group_class: &NodeGroupClass, epc: u8) -> Result<Box<dyn
                         } else {
                             Err(EpcError::InvalidValue(epc.epc(), format!(ERR_INVALID_LENGTH!(), 6, internal.len())))
                         }
-                    )
-                )) as Box<dyn EpcWrapper>
+                )
             } else {
-                Box::new(StaticNodeProperty::new(
+                general_property(
                     "Version Information",
                     epc,
                     EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_CLASS,
                     false,
                     EpcAccessRule::Mandatory,
                     EpcAccessRule::NotSupported,
-                    Box::new(move |_: &dyn Epc<Canonical = NodeDeviceObjectEchonetLiteSupportedVersion>, canonical| {
+                    move |_: &dyn Epc<Canonical = NodeDeviceObjectEchonetLiteSupportedVersion>, canonical| {
                         let mut internal = vec![0x00_u8; 6];
                         internal[4] = canonical.release.to_ascii_uppercase() as u8;
                         internal[5] = canonical.revision;
                         Ok(internal)
-                    }),
-                    Box::new(move |_, internal| Ok(NodeDeviceObjectEchonetLiteSupportedVersion {
+                    },
+                    move |_, internal| Ok(NodeDeviceObjectEchonetLiteSupportedVersion {
                         release: internal[2] as char,
                         revision: internal[3],
-                    })),
-                    Box::new(move |epc, internal|
+                    }),
+                    move |epc, internal|
                         if internal.len() == 6 {
                             if (internal[4] as char).is_ascii() {
                                 Ok(true)
@@ -777,9 +1097,8 @@ pub fn property_factory(group_class: &NodeGroupClass, epc: u8) -> Result<Box<dyn
                         } else {
                             Err(EpcError::InvalidValue(epc.epc(), format!(ERR_INVALID_LENGTH!(), 6, internal.len())))
                         }
-                    )
-                )) as Box<dyn EpcWrapper>
-            }),
+                )
+            },
             // This stores two values. The whole value can be considered the identification number, with the
             // first byte identifying the communication medium. In ECHONET Lite, this is fixed at 0xfe. This also means
             // that the rest of the data is the "manufacturer specified format". This is basically 3 bytes identifying
@@ -801,6 +1120,34 @@ pub fn property_factory(group_class: &NodeGroupClass, epc: u8) -> Result<Box<dyn
                     Err(EpcError::InvalidValue(epc.epc(), format!("expected 17 bytes found {}", internal.len())))
                 }
             ),
+            EPC_MEASURED_INSTANTANEOUS_POWER_CONSUMPTION => integer_property::<u16>(
+                "Measured Instantaneous Power Consumption (W)",
+                epc,
+                EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_NONE,
+                false,
+                EpcAccessRule::Supported,
+                EpcAccessRule::NotSupported
+            ),
+            EPC_MEASURED_CUMULATIVE_POWER_CONSUMPTION => unsigned_integer_packed_float_property::<4>(
+                "Measured Cumulative Power Consumption (kWh)",
+                epc,
+                EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_NONE,
+                false,
+                EpcAccessRule::Supported,
+                EpcAccessRule::NotSupported,
+                999_999.999,
+                3
+            ),
+            EPC_CURRENT_LIMIT_SETTING => unsigned_integer_packed_float_property::<1>(
+                "Current Limit Setting (%)",
+                epc,
+                EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_NONE,
+                false,
+                EpcAccessRule::Supported,
+                EpcAccessRule::Supported,
+                100.0,
+                0
+            ),
             // Fault status. True if a fault is encountered
             EPC_FAULT_STATUS => boolean_property(
                 "Fault Status",
@@ -814,21 +1161,30 @@ pub fn property_factory(group_class: &NodeGroupClass, epc: u8) -> Result<Box<dyn
             ),
             // Fault content: 0x0000 to 0x03E8 same as device. 0x03E9 to 0x03EC: abnormality codes of ECHONET Lite middleware
             // adapters described in "Part III, ECHONET Lite Communications Equipment Specifications."
-            // FIXME: update this to cover the device type. Change from u16 to a custom class.
-            EPC_FAULT_CONTENT => integer_property::<NodeObjectFaultContent>(
+            // This is sort of an integer, but if we use the integer technique, conversion errors will not be caught.
+            EPC_FAULT_CONTENT => general_property(
                 "Fault Content (Fault Description)",
                 epc,
                 EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_CLASS,
                 false,
                 EpcAccessRule::Supported,
                 EpcAccessRule::NotSupported,
-                move |epc, _| {
-                    let val = epc.to_canonical()?;
-                    if 0x0000 < (*val) && (*val) <= 0x03ec {
-                        Ok(true)
-                    } else {
-                        Err(EpcError::InvalidValue(epc.epc(), "Value not in range 0x0000 - 0x03ec".to_owned()))
-                    }
+                move |epc: &dyn Epc<Canonical = NodeObjectFaultDescription>, canonical| {
+                    let mut buf = vec![0x00_u8; std::mem::size_of::<u16>()];
+                    let bytes = canonical.to_u16().to_be_bytes();
+                    buf.copy_from_slice(&bytes);
+                    Ok(buf)
+                },
+                move |epc: &dyn Epc<Canonical = NodeObjectFaultDescription>, internal| {
+                    // Safe as the validator already checked the size.
+                    let val = u16::from_be_bytes(internal.try_into().unwrap());
+                    NodeObjectFaultDescription::try_from_u16(val)
+                        .map_err(|msg| EpcError::InvalidValue(epc.epc(), msg.to_owned()))
+                },
+                move |epc, internal| {
+                    // Only way to validate is by resolving the enum Check the size first.
+                    validate_length(epc.epc(), internal, std::mem::size_of::<u16>());
+                    epc.to_canonical().map(|_|true)
                 }
             ),
             EPC_MANUFACTURER_CODE => hex_string_property(
@@ -901,62 +1257,6 @@ pub fn property_factory(group_class: &NodeGroupClass, epc: u8) -> Result<Box<dyn
                 EpcAccessRule::Mandatory,
                 EpcAccessRule::NotSupported,
             ),
-            EPC_UNIQUE_IDENTIFIER_DATA => integer_property::<NodeObjectUniqueIdentifier>(
-                "Unique Identifier Data",
-                epc,
-                EPC_DOCSOURCE_DEVICE_NONE | EPC_DOCSOURCE_PROFILE_CLASS,
-                false,
-                EpcAccessRule::Supported,
-                EpcAccessRule::Supported,
-                move |_, _| Ok(true)
-            ),
-            EPC_NUMBER_OF_SELFNODE_INSTANCES => integer_property::<u16>( // FIXME: this is a three byte integer!!!
-                "Number of Self-Node Instances",
-                epc,
-                EPC_DOCSOURCE_DEVICE_NONE | EPC_DOCSOURCE_PROFILE_CLASS,
-                false,
-                EpcAccessRule::Mandatory,
-                EpcAccessRule::NotSupported,
-                move |_, _| Ok(true)
-            ),
-            EPC_NUMBER_OF_SELFNODE_CLASSES => integer_property::<u16>(
-                "Number of Self-Node Classes",
-                epc,
-                EPC_DOCSOURCE_DEVICE_NONE | EPC_DOCSOURCE_PROFILE_CLASS,
-                false,
-                EpcAccessRule::Mandatory,
-                EpcAccessRule::NotSupported,
-                move |_, _| Ok(true)
-            ),
-            // Does not include Node Profile objects. Max 84. If over this, then the announcement message can have multiple
-            // EPC blocks, with the same OPC code, i.e. a repeated OPC. However, that is difficult to interpret, as multiple
-            // OPC valus in the same message need to be treated as a logical and, while if in a new message, then it should
-            // be treated as an overwrite. For now this is not supported an we will just read the message. If there is two
-            // EPCs with the same value in the message, then the last one will win.
-            EPC_INSTANCE_LIST_NOTIFICATION => eoj_array_property( // Create. custom type for this as the logic is complex. Also, a custom type can store larger than the amount, as we store decoded.
-                "Instance List Notification",
-                epc,
-                EPC_DOCSOURCE_DEVICE_NONE | EPC_DOCSOURCE_PROFILE_CLASS,
-                true,
-                EpcAccessRule::NotSupported,
-                EpcAccessRule::NotSupported,
-            ),
-            EPC_SELFNODE_INSTANCE_LIST_S => eoj_array_property( // Create. custom type for this as the logic is complex
-                "Self-Node Instance List S",
-                epc,
-                EPC_DOCSOURCE_DEVICE_NONE | EPC_DOCSOURCE_PROFILE_CLASS,
-                false,
-                EpcAccessRule::Mandatory,
-                EpcAccessRule::NotSupported,
-            ),
-            EPC_SELFNODE_CLASS_LIST_S => eoj_array_property( // Create. custom type for this as the logic is complex
-                "Self-Node Class List S",
-                epc,
-                EPC_DOCSOURCE_DEVICE_NONE | EPC_DOCSOURCE_PROFILE_CLASS,
-                false,
-                EpcAccessRule::Mandatory,
-                EpcAccessRule::NotSupported,
-            ),
             _ => Err(EpcError::NotAvailable(epc))
         }
     } else if epc >= 0xa0 && epc < 0xf0 {
@@ -964,7 +1264,10 @@ pub fn property_factory(group_class: &NodeGroupClass, epc: u8) -> Result<Box<dyn
         // Create a function to check the group, if not, try the class.
         // group epc >= 0xa0 && epc < 0xc0
         // class epc >= 0xc0 && epc < 0xf0
-        Err(EpcError::NotAvailable(epc))
+        match group_class {
+            &CLASS_PROFILE_NODE_PROFILE => property_factory_class_profile(epc),
+            _ => Err(EpcError::NotAvailable(epc))
+        }
     } else {
         // User defined area.
         Err(EpcError::NotAvailable(epc))
@@ -974,3 +1277,62 @@ pub fn property_factory(group_class: &NodeGroupClass, epc: u8) -> Result<Box<dyn
     Ok(property)
 }
 
+/// Create the properties for the node profile
+fn property_factory_class_profile(epc: u8) -> Result<Box<dyn EpcWrapper>, EpcError> {
+    match epc {
+        EPC_UNIQUE_IDENTIFIER_DATA => integer_property::<NodeObjectUniqueIdentifier>(
+            "Unique Identifier Data",
+            epc,
+            EPC_DOCSOURCE_DEVICE_NONE | EPC_DOCSOURCE_PROFILE_CLASS,
+            false,
+            EpcAccessRule::Supported,
+            EpcAccessRule::Supported
+        ),
+        EPC_NUMBER_OF_SELFNODE_INSTANCES => integer_property::<NodeObjectInstanceCount>(
+            "Number of Self-Node Instances",
+            epc,
+            EPC_DOCSOURCE_DEVICE_NONE | EPC_DOCSOURCE_PROFILE_CLASS,
+            false,
+            EpcAccessRule::Mandatory,
+            EpcAccessRule::NotSupported
+        ),
+        EPC_NUMBER_OF_SELFNODE_CLASSES => integer_property::<u16>(
+            "Number of Self-Node Classes",
+            epc,
+            EPC_DOCSOURCE_DEVICE_NONE | EPC_DOCSOURCE_PROFILE_CLASS,
+            false,
+            EpcAccessRule::Mandatory,
+            EpcAccessRule::NotSupported
+        ),
+        // Does not include Node Profile objects. Max 84. If over this, then the announcement message can have multiple
+        // EPC blocks, with the same OPC code, i.e. a repeated OPC. However, that is difficult to interpret, as multiple
+        // OPC valus in the same message need to be treated as a logical and, while if in a new message, then it should
+        // be treated as an overwrite. For now this is not supported an we will just read the message. If there is two
+        // EPCs with the same value in the message, then the last one will win.
+        EPC_INSTANCE_LIST_NOTIFICATION => eoj_array_property( // Create. custom type for this as the logic is complex. Also, a custom type can store larger than the amount, as we store decoded.
+            "Instance List Notification",
+            epc,
+            EPC_DOCSOURCE_DEVICE_NONE | EPC_DOCSOURCE_PROFILE_CLASS,
+            true,
+            EpcAccessRule::NotSupported,
+            EpcAccessRule::NotSupported,
+        ),
+        EPC_SELFNODE_INSTANCE_LIST_S => eoj_array_property( // Create. custom type for this as the logic is complex
+            "Self-Node Instance List S",
+            epc,
+            EPC_DOCSOURCE_DEVICE_NONE | EPC_DOCSOURCE_PROFILE_CLASS,
+            false,
+            EpcAccessRule::Mandatory,
+            EpcAccessRule::NotSupported,
+        ),
+        EPC_SELFNODE_CLASS_LIST_S => eoj_array_property( // Create. custom type for this as the logic is complex
+            "Self-Node Class List S",
+            epc,
+            EPC_DOCSOURCE_DEVICE_NONE | EPC_DOCSOURCE_PROFILE_CLASS,
+            false,
+            EpcAccessRule::Mandatory,
+            EpcAccessRule::NotSupported,
+        ),
+        _ => Err(EpcError::NotAvailable(epc))
+    }
+}

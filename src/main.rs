@@ -1,6 +1,6 @@
 //! Main entrypoint for the EchoNet Lite to Home Assistant bridge
-#![feature(assert_matches, generic_const_exprs, type_alias_impl_trait)]
 #![allow(incomplete_features)]
+#![feature(assert_matches, generic_const_exprs, type_alias_impl_trait)]
 
 extern crate macros;
 mod config;

@@ -1,6 +1,6 @@
 //! Module containing all of the usable EPC types.
 use super::api::*;
-use chrono::Datelike;
+use chrono::{Datelike, Timelike};
 use core::f64;
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -49,8 +49,6 @@ pub const EPC_SELFNODE_CLASS_LIST_S: u8 = 0xd7;
 ///////////////////////////////////////////////////////////////////////////////
 const EPC_OPERATION_STATUS_ON: u8 = 0x30;
 const EPC_OPERATION_STATUS_OFF: u8 = 0x31;
-const EPC_FAULT_ENCOUNTERED: u8 = 0x41;
-const EPC_FAULT_NOT_ENCOUNTERED: u8 = 0x42;
 
 // What message types are supported
 const NODE_MESSAGE_FORMAT_SPECIFIED: u8 = 0x01;
@@ -805,6 +803,104 @@ fn date_property(name: &'static str, epc: u8, source: u16,
     )
 }
 
+/// General handler for time types
+fn time_property(name: &'static str, epc: u8, source: u16,
+    announce: bool, get_operation: EpcAccessRule, set_operation: EpcAccessRule,
+    validator: impl Fn(&dyn Epc<Canonical = chrono::NaiveTime>, &[u8]) -> Result<bool, EpcError> + 'static) -> Result<Box<dyn EpcWrapper>, EpcError>
+{
+    general_property(
+        name,
+        epc,
+        source,
+        announce,
+        get_operation,
+        set_operation,
+        move |_: &dyn Epc<Canonical = chrono::NaiveTime>, canonical| {
+            let mut buf = vec![0x00; 4];
+            buf[2] = canonical.hour() as u8;
+            buf[3] = canonical.minute() as u8;
+            Ok(buf)
+        },
+        move |epc: &dyn Epc<Canonical = chrono::NaiveTime>, internal| {
+            let hour = internal[2] as u32;
+            let minute = internal[3] as u32;
+
+            let maybe_canonical = chrono::NaiveTime::from_hms_opt(hour, minute, 0);
+            if let Some(canonical) = maybe_canonical {
+                Ok(canonical)
+            } else {
+                return Err(EpcError::InvalidValue(epc.epc(), "error parsing time".to_owned()));
+            }
+        },
+        move |epc, internal|
+            if internal.len() == 4 {
+                if internal[2] < 24 && internal[3] < 60 {
+                    validator(epc, internal)
+                } else {
+                    Err(EpcError::InvalidValue(epc.epc(), "Time not in range".to_owned()))
+                }
+            } else {
+                Err(EpcError::InvalidValue(epc.epc(), format!(ERR_INVALID_LENGTH!(), 6, internal.len())))
+            }
+    )
+}
+
+/// General handler for duration types (only really simple durations)
+fn duration_property(name: &'static str, epc: u8, source: u16,
+    announce: bool, get_operation: EpcAccessRule, set_operation: EpcAccessRule,
+    validator: impl Fn(&dyn Epc<Canonical = chrono::TimeDelta>, &[u8]) -> Result<bool, EpcError> + 'static) -> Result<Box<dyn EpcWrapper>, EpcError>
+{
+    general_property(
+        name,
+        epc,
+        source,
+        announce,
+        get_operation,
+        set_operation,
+        move |epc: &dyn Epc<Canonical = chrono::TimeDelta>, canonical| {
+            // Need to decide the most appropriate value based on overflows. Try smallest first
+            let mut internal = vec![0x00_u8; 7];
+            if let amount = canonical.num_seconds() && amount <= u32::MAX as i64 {
+                internal[2] = 0x41;
+                (&mut internal[3..8]).copy_from_slice(amount.to_be_bytes().as_slice());
+            } else if let amount = canonical.num_minutes() && amount <= u32::MAX as i64 {
+                internal[2] = 0x42;
+                (&mut internal[3..8]).copy_from_slice(amount.to_be_bytes().as_slice());
+            } else if let amount = canonical.num_hours() && amount <= u32::MAX as i64 {
+                internal[2] = 0x43;
+                (&mut internal[3..8]).copy_from_slice(amount.to_be_bytes().as_slice());
+            } else if let amount = canonical.num_days() && amount <= u32::MAX as i64 {
+                internal[2] = 0x44;
+                (&mut internal[3..8]).copy_from_slice(amount.to_be_bytes().as_slice());
+            } else {
+                return Err(EpcError::InvalidValue(epc.epc(), "TimeDelta overflows internal value".to_owned()))
+            }
+            Ok(internal)
+        },
+        move |_: &dyn Epc<Canonical = chrono::TimeDelta>, internal| {
+            let amount = u32::from_be_bytes((&internal[3..]).try_into().unwrap()) as i64;
+            let td = match internal[2] {
+                0x41 => chrono::TimeDelta::seconds(amount),
+                0x42 => chrono::TimeDelta::minutes(amount),
+                0x43 => chrono::TimeDelta::hours(amount),
+                0x44 => chrono::TimeDelta::days(amount),
+                _ => unreachable!()
+            };
+            Ok(td)
+        },
+        move |epc, internal|
+            if internal.len() == 7 {
+                if internal[2] >= 0x41 && internal[2] <= 0x44 {
+                    validator(epc, internal)
+                } else {
+                    Err(EpcError::InvalidValue(epc.epc(), "Not a vaslid duration type".to_owned()))
+                }
+            } else {
+                Err(EpcError::InvalidValue(epc.epc(), format!(ERR_INVALID_LENGTH!(), 6, internal.len())))
+            }
+    )
+}
+
 /// Handler for NodePropertyMap types
 fn property_map_property(name: &'static str, epc: u8, source: u16,
     announce: bool, get_operation: EpcAccessRule, set_operation: EpcAccessRule) -> Result<Box<dyn EpcWrapper>, EpcError>
@@ -900,7 +996,7 @@ fn validate_length(epc_code: u8, internal: &[u8], len: usize) -> Result<bool, Ep
     if internal.len() == len + 2 {
         Ok(true)
     } else {
-        Err(EpcError::InvalidValue(epc_code, format!("expected {} bytes found {}", len + 2, internal.len())))
+        Err(EpcError::InvalidValue(epc_code, format!(ERR_INVALID_LENGTH!(), len + 2, internal.len())))
     }
 }
 
@@ -1138,6 +1234,38 @@ pub fn property_factory(group_class: &NodeGroupClass, epc: u8) -> Result<Box<dyn
                 999_999.999,
                 3
             ),
+            EPC_MANUFACTURERS_FAULT_CODE => general_property(
+                "Manufacturer's fault Code",
+                epc,
+                EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_NONE,
+                false,
+                EpcAccessRule::Supported,
+                EpcAccessRule::NotSupported,
+                move |epc: &dyn Epc<Canonical = NodeObjectManufacturerFaultCode>, canonical| {
+                    let buf_len = canonical.manufacturer_code.byte_len() + canonical.fault_code.byte_len() + 2;
+                    let mut buf = vec![0x00_u8; buf_len];
+                    canonical.manufacturer_code.decode_into_slice(&mut buf[2..])
+                        .map_err(|err| EpcError::InvalidValue(epc.epc(), err.to_string()))?;
+                    canonical.fault_code.decode_into_slice(&mut buf[5..])
+                        .map_err(|err| EpcError::InvalidValue(epc.epc(), err.to_string()))?;
+                    Ok(buf)
+                },
+                move |epc: &dyn Epc<Canonical = NodeObjectManufacturerFaultCode>, internal| {
+                    // Validator guarentees the manufacturer code will exist.
+                    let manufacturer_code = HexString::from_bytes(&internal[2..5], 3)
+                        .map_err(|err|EpcError::InvalidValue(epc.epc(), err.to_string()))?;
+                    let fault_code = HexString::from_bytes(&internal[5..], internal.len() - 5)
+                        .map_err(|err|EpcError::InvalidValue(epc.epc(), err.to_string()))?;
+                    Ok(NodeObjectManufacturerFaultCode {manufacturer_code, fault_code})
+                },
+                move |epc, internal| {
+                    if internal.len() >= 5 { // 2 header + 3 manufacturer code
+                        Ok(true)
+                    } else {
+                        Err(EpcError::InvalidValue(epc.epc(), format!("Required length must be greater than {}, was {}", 5, internal.len())))
+                    }
+                }
+            ),
             EPC_CURRENT_LIMIT_SETTING => unsigned_integer_packed_float_property::<1>(
                 "Current Limit Setting (%)",
                 epc,
@@ -1156,8 +1284,8 @@ pub fn property_factory(group_class: &NodeGroupClass, epc: u8) -> Result<Box<dyn
                 if is_profile {false} else {true},
                 EpcAccessRule::Supported,
                 EpcAccessRule::NotSupported,
-                EPC_FAULT_ENCOUNTERED,
-                EPC_FAULT_NOT_ENCOUNTERED
+                0x41,
+                0x42
             ),
             // Fault content: 0x0000 to 0x03E8 same as device. 0x03E9 to 0x03EC: abnormality codes of ECHONET Lite middleware
             // adapters described in "Part III, ECHONET Lite Communications Equipment Specifications."
@@ -1170,20 +1298,20 @@ pub fn property_factory(group_class: &NodeGroupClass, epc: u8) -> Result<Box<dyn
                 EpcAccessRule::Supported,
                 EpcAccessRule::NotSupported,
                 move |epc: &dyn Epc<Canonical = NodeObjectFaultDescription>, canonical| {
-                    let mut buf = vec![0x00_u8; std::mem::size_of::<u16>()];
+                    let mut buf = vec![0x00_u8; std::mem::size_of::<u16>() + 2];
                     let bytes = canonical.to_u16().to_be_bytes();
-                    buf.copy_from_slice(&bytes);
+                    (&mut buf[2..]).copy_from_slice(&bytes);
                     Ok(buf)
                 },
                 move |epc: &dyn Epc<Canonical = NodeObjectFaultDescription>, internal| {
                     // Safe as the validator already checked the size.
-                    let val = u16::from_be_bytes(internal.try_into().unwrap());
+                    let val = u16::from_be_bytes((&internal[2..]).try_into().unwrap());
                     NodeObjectFaultDescription::try_from_u16(val)
                         .map_err(|msg| EpcError::InvalidValue(epc.epc(), msg.to_owned()))
                 },
                 move |epc, internal| {
                     // Only way to validate is by resolving the enum Check the size first.
-                    validate_length(epc.epc(), internal, std::mem::size_of::<u16>());
+                    validate_length(epc.epc(), internal, std::mem::size_of::<u16>())?;
                     epc.to_canonical().map(|_|true)
                 }
             ),
@@ -1227,6 +1355,80 @@ pub fn property_factory(group_class: &NodeGroupClass, epc: u8) -> Result<Box<dyn
                 "Production Date (Date of Manufacture)",
                 epc,
                 EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_SUPERCLASS,
+                false,
+                EpcAccessRule::Supported,
+                EpcAccessRule::NotSupported,
+                move |_, _| Ok(true)
+            ),
+            EPC_POWER_SAVING => boolean_property(
+                "Power Saving",
+                epc,
+                EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_NONE,
+                false,
+                EpcAccessRule::Supported,
+                EpcAccessRule::Supported,
+                0x41,
+                0x42
+            ),
+            // Remote control. This is a horrible property, with a very badly worded description.
+            EPC_REMOTE_CONTROL => general_property(
+                "Remote Control",
+                epc,
+                EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_NONE,
+                false,
+                EpcAccessRule::Supported,
+                EpcAccessRule::Supported,
+                move |_: &dyn Epc<Canonical = NodeObjectRemoteControl>, canonical| {
+                    let mut buf = vec![0x00_u8; 3];
+                    buf[2] = if canonical.network_type == NetworkType::NonPublic {0x41} else {0x42} | 
+                        if canonical.network_status == NetworkStatus::Ok {0x60} else {0x00};
+                    Ok(buf)
+                },
+                move |_: &dyn Epc<Canonical = NodeObjectRemoteControl>, internal| {
+                    let network_type = if internal[2] & 0x41 == 0x41 {NetworkType::NonPublic} else {NetworkType::Public};
+                    let network_status = if internal[2] & 0x60 == 0x60 {NetworkStatus::Ok} else {NetworkStatus::NotOk};
+                    Ok(NodeObjectRemoteControl {network_type, network_status})
+                },
+                move |epc, internal| {
+                    // Only way to validate is by resolving the enum Check the size first.
+                    validate_length(epc.epc(), internal, 1)?;
+                    if internal[2] & 0x40 == 0x40 && internal[2] & 0x03 != 0x00 {
+                        Ok(true)
+                    } else {
+                        Err(EpcError::InvalidValue(epc.epc(), "Invalid boolean value".to_owned()))
+                    }
+                }
+            ),
+            EPC_CURRENT_TIME => time_property(
+                "Current Time",
+                epc,
+                EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_NONE,
+                false,
+                EpcAccessRule::Supported,
+                EpcAccessRule::Supported,
+                move |_, _| Ok(true)
+            ),
+            EPC_CURRENT_DATE => date_property(
+                "Current Date",
+                epc,
+                EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_NONE,
+                false,
+                EpcAccessRule::Supported,
+                EpcAccessRule::Supported,
+                move |_, _| Ok(true)
+            ),
+            EPC_POWER_LIMIT => integer_property::<u16>(
+                "Power Limit (W)",
+                epc,
+                EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_NONE,
+                false,
+                EpcAccessRule::Supported,
+                EpcAccessRule::Supported
+            ),
+            EPC_CUMULATIVE_OPERATING_TIME => duration_property(
+                "Cumulative Operating Time",
+                epc,
+                EPC_DOCSOURCE_DEVICE_SUPERCLASS | EPC_DOCSOURCE_PROFILE_NONE,
                 false,
                 EpcAccessRule::Supported,
                 EpcAccessRule::NotSupported,

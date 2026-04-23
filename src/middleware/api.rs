@@ -291,6 +291,7 @@ pub enum NodeObjectInstallationLocation {
     LocationInformationCode(u64)
 }
 
+
 /// Node capabilities
 #[derive(PartialEq, Eq, Debug)]
 #[repr(u8)]
@@ -298,6 +299,7 @@ pub enum NodeType {
     General = super::NODE_TYPE_GENERAL,
     TransmitOnly = super::NODE_TYPE_TRANSMIT_ONLY
 }
+
 
 /// Node physical addresses
 #[derive(PartialEq, Eq, Debug)]
@@ -307,6 +309,24 @@ pub enum NodePhysicalAddress {
     IPV6(),
     Broadcast(), // Does not need an addr, it uses all.
     Serial(String),
+}
+
+/// Network types
+#[derive(PartialEq, Eq, Debug, Display)]
+pub enum NetworkType {
+    #[display("Public")]
+    Public,
+    #[display("Non-public")]
+    NonPublic
+}
+
+/// Network status
+#[derive(PartialEq, Eq, Debug, Display)]
+pub enum NetworkStatus {
+    #[display("Ok")]
+    Ok,
+    #[display("Not ok")]
+    NotOk
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -449,7 +469,7 @@ impl HexString {
     ///
     /// * `buf` - The byte buffer to encode.
     /// * `len` - The total length of bytes to represent. If the length is
-    ///           smaller than the buffer, and error is returned. If the
+    ///           smaller than the buffer, an error is returned. If the
     ///           length is larger, the HexString will be left padded with
     ///           "00".
     pub fn from_bytes(buf: &[u8], len: usize) -> Result<Self, HexStringError> {
@@ -633,6 +653,21 @@ pub struct NodeDeviceObjectEchonetLiteSupportedVersion {
     pub revision: u8,
 }
 
+/// Remote control setting. This would be a simple boolean if not for the communication line status
+/// The description is very strange, but it is interpreted as bit 6 identifies that the communication
+/// line is normal. Also not stated, we can assume that if bit 6 is not set, the communication line
+/// status is abnormal.
+/// Refer to Appendix 2.16 for details on this property. It has a very complicated purpose that
+/// essentially determines which device (ECHONET Lite or device control) has control over the device.
+/// There is an implication that this must be set before propviding properties to "take control" of
+/// the device before setting other properties.
+#[derive(PartialEq, Debug, Display)]
+#[display("Remote Control is allowed on {}, line status is {}", network_type, network_status)]
+pub struct NodeObjectRemoteControl {
+    pub network_type: NetworkType,
+    pub network_status: NetworkStatus
+}
+
 /// Holder for Unique Identifier Data
 #[derive(Clone, Copy, Debug, Default, Display, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[display("{}", _0)]
@@ -661,6 +696,15 @@ impl NodeObjectUniqueIdentifier {
         };
     }
 }
+
+// Holder for the manufacturer's fault code
+#[derive(Clone, Debug, Display, PartialEq)]
+#[display("Fault(manufacturer: {}, code: {})", manufacturer_code, fault_code)]
+pub struct NodeObjectManufacturerFaultCode {
+    pub manufacturer_code: HexString,
+    pub fault_code: HexString
+}
+
 
 /// Holder for the supported EPC property maps
 pub struct NodeObjectPropertyMap {

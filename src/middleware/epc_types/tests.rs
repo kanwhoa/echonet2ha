@@ -96,6 +96,7 @@ fn node_profile_object_announce_list_to_wire_tests_success(input: &EOJVec, inter
     );
 }
 
+
 #[test_case(0.0, &[0x00] ; "when 0%")]
 #[test_case(50.0, &[0x32] ; "when 50%")]
 #[test_case(100.0, &[0x64] ; "when 100%")]
@@ -109,6 +110,8 @@ fn from_percentage_success(input: f64, internal: &[u8]) {
         internal
     );
 }
+// TODO: failure tests
+
 
 #[test_case(0.0, &[0x00, 0x00, 0x00, 0x00] ; "when 0.000w")]
 #[test_case(0.001, &[0x00, 0x00, 0x00, 0x01] ; "when 0.001w")]
@@ -124,3 +127,11 @@ fn from_float_success(input: f64, internal: &[u8]) {
         internal
     );
 }
+// TODO: failure tests
+
+
+// TODO tests:
+// EPC_FAULT_CONTENT -> NodeObjectFaultDescription
+// ? -> NodeObjectInstallationLocation
+// > -> time property
+// > -> duration property
